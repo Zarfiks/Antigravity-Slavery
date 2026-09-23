@@ -21,7 +21,7 @@ First public release.
   `AGY_CHAIN_<TIER>` overrides a model chain.
 - Permission denials are reported clearly and do not burn the fallback chain.
 - `SKILL.md`: guidance on how many workers to launch; access-level table.
-- MIT license, installer, examples.
+- MIT license, installer (`--codex` for OpenAI Codex), examples.
 
 ## 0.1.0 — 2026-09-18
 

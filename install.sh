@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# install.sh — make the skill visible to Claude Code.
+# install.sh — make the skill visible to Claude Code (or Codex).
 #
 #   ./install.sh            copy into ~/.claude/skills/antigravity-slavery
 #   ./install.sh --link     symlink instead (edits here take effect at once)
 #   ./install.sh --project  install into ./.claude/skills of the current directory
+#   ./install.sh --codex    install into ~/.codex/skills for OpenAI Codex CLI
 set -euo pipefail
 
 src="$(cd "$(dirname "$0")" && pwd)"
@@ -12,7 +13,8 @@ for a in "$@"; do
     case "$a" in
         --link)    mode=link ;;
         --project) dest_root="$PWD/.claude/skills" ;;
-        *) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+        --codex)   dest_root="$HOME/.codex/skills" ;;
+        *) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
     esac
 done
 dest="$dest_root/antigravity-slavery"

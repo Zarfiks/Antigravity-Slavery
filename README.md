@@ -1,127 +1,126 @@
+<div align="center">
+
 # Antigravity Slavery
 
-A [Claude Code](https://claude.com/claude-code) skill that uses the Antigravity
-CLI (`agy`) as a pool of disposable subagent workers. Claude stays the
-orchestrator; Gemini, Claude and GPT-OSS workers read the files, and only their
-conclusions come back. Claude's context stays small.
+*Turn Claude Code or Codex into an orchestrator — hand heavy jobs to Antigravity sub-agents and keep only the answers.*
+
+<p>
+  <a href="https://claude.com/claude-code"><img src="https://img.shields.io/badge/Claude_Code-orchestrator-D97757?style=for-the-badge&logo=claude&logoColor=white&labelColor=555" alt="Claude Code orchestrator"></a>
+  <a href="https://github.com/openai/codex"><img src="https://img.shields.io/badge/Codex-orchestrator-10A37F?style=for-the-badge&logo=openai&logoColor=white&labelColor=555" alt="Codex orchestrator"></a>
+  <a href="https://antigravity.google"><img src="https://img.shields.io/badge/Antigravity_CLI-agy-4285F4?style=for-the-badge&logo=google&logoColor=white&labelColor=555" alt="Antigravity CLI agy"></a>
+</p>
+<p>
+  <img src="https://img.shields.io/badge/workers-Gemini_%7C_Claude_%7C_GPT--OSS-8E75B2?style=for-the-badge&logo=googlegemini&logoColor=white&labelColor=555" alt="Workers: Gemini, Claude, GPT-OSS">
+  <img src="https://img.shields.io/badge/skill-SKILL.md-333?style=for-the-badge&labelColor=555" alt="Skill">
+  <img src="https://img.shields.io/badge/Windows_%7C_macOS_%7C_Linux-ready-222?style=for-the-badge&labelColor=555" alt="Windows, macOS, Linux">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3FB950?style=for-the-badge&labelColor=555" alt="MIT license"></a>
+</p>
+
+**Created by [Zarfiks](https://github.com/Zarfiks)**
+
+</div>
+
+---
+
+## What is it
+
+A skill: one `SKILL.md` file plus two small scripts. It teaches your AI coding
+agent (Claude Code or Codex) to pass work to the
+[Antigravity CLI](https://antigravity.google) (`agy`).
+
+Your agent becomes the **boss**. `agy` workers are the **helpers**. A helper
+reads the files, does the job and returns a short answer. The boss never loads
+those files, so its context stays small and it keeps working on your task.
 
 ```
-Claude Code (orchestrator)
- ├── agy worker: gemini-high    ─┐
- ├── agy worker: gemini-medium  ─┤
- ├── agy worker: gemini-medium  ─┼─→ answers (text or JSON) ─→ Claude decides
- ├── agy worker: opus           ─┤
- └── shared memory file ←───────┘
+You ──► Claude Code / Codex  (boss)
+            ├── agy helper: Gemini high   ─┐
+            ├── agy helper: Gemini medium ─┼──► short answers ──► boss decides
+            ├── agy helper: Claude Opus   ─┘
+            └── shared notes file (helpers read what others found)
 ```
 
-## What you get
+**Good for:** reading a big log, checking the same thing in ten modules,
+a second opinion from another model, simple edits in a safe copy of the repo.
 
-- **Six tiers** named after their models: `gemini-high`, `gemini-medium`,
-  `gemini-low`, `opus`, `sonnet`, `gpt-oss`, each with automatic fallback when
-  a model is out of capacity.
-- **Safe by default.** Workers cannot run shell commands unless you allow it.
-  A guard warns when a worker changes files it should only read.
-- **Worktree isolation.** `-w` runs an editing worker in a throwaway
-  `git worktree`; you review the diff before anything touches your checkout.
-- **Shared memory.** `-m notes.md` lets workers read what earlier workers found.
-- **Fan-out.** `agy-fanout.sh` runs one worker per line of a tasks file, in
-  parallel.
-- **Structured output** with a JSON Schema, a run log with token costs, and
-  resume by conversation id.
-- **Guidance for Claude** on when delegation pays off and how many workers to
-  start, based on measured costs (every call has ~12k tokens of overhead).
-
-## Requirements
-
-- Antigravity CLI `agy` on `PATH` (tested with v1.2.6 and v1.2.7), signed in.
-- `bash` 3.2+, `git`, Python 3.
-- Linux, macOS, WSL, or Windows with Git Bash.
+**Not for:** small jobs. Every helper costs about 12 000 tokens and a few
+seconds. Two `grep`s are faster.
 
 ## Install
+
+You need: the [Antigravity CLI](https://antigravity.google) (`agy`) signed in,
+`git`, Python 3, and bash (on Windows, Git Bash).
 
 ```bash
 git clone https://github.com/Zarfiks/Antigravity-Slavery.git
 cd Antigravity-Slavery
-./install.sh              # copy to ~/.claude/skills/antigravity-slavery
-# ./install.sh --link     # symlink instead, for development
-# ./install.sh --project  # into ./.claude/skills of the current project
+./install.sh            # Claude Code
+./install.sh --codex    # Codex
 ```
 
-Restart Claude Code. The skill loads on its own when delegation fits, or on
-request: `/antigravity-slavery`, "use agy", "use subagents".
+Restart your agent. Done.
 
-## Use without Claude
+## Use it
+
+Just ask your agent:
+
+> "Use agy helpers to find every place we read config in this repo."
+>
+> "Get a second opinion from opus on this function."
+>
+> "Have an agy helper fix this bug in a worktree."
+
+The agent picks the model and the number of helpers by itself.
+
+## Models
+
+| Name | Model | For |
+|---|---|---|
+| `gemini-high`   | Gemini 3.8 Flash High   | hard questions |
+| `gemini-medium` | Gemini 3.8 Flash Medium | normal work |
+| `gemini-low`    | Gemini 3.8 Flash Low    | simple, clear tasks |
+| `opus`          | Claude Opus 4.6         | second opinion |
+| `sonnet`        | Claude Sonnet 4.6       | cheaper second opinion, text |
+| `gpt-oss`       | GPT-OSS 120B            | quick yes/no checks |
+
+If a model is busy, the next one of the same level is used automatically.
+
+## Run by hand (optional)
 
 ```bash
-# one worker, read-only
-scripts/agy-slave.sh gemini-medium "Explain the retry logic in src/net/client.py" ./repo
+# ask one helper
+scripts/agy-slave.sh gemini-medium "Explain src/net/client.py" ./repo
 
-# a second opinion from another model family
-scripts/agy-slave.sh opus "Is the locking in src/cache.py correct?" ./repo
+# let a helper edit code in a safe copy (git worktree)
+scripts/agy-slave.sh -w gemini-high "Fix the bug in calc.py" ./repo
 
-# an edit in an isolated worktree
-scripts/agy-slave.sh -w gemini-high "Add input validation to parse_config()" ./repo
-
-# structured answer
-scripts/agy-slave.sh -s examples/verdict.schema.json gemini-low "Does src/ use eval()?" ./repo
-
-# many workers with shared memory
-scripts/agy-fanout.sh -j 3 -m .agy-memory.md gemini-medium ./repo examples/tasks.txt
+# many helpers at once, one task per line, with shared notes
+scripts/agy-fanout.sh -j 3 -m notes.md gemini-medium ./repo examples/tasks.txt
 ```
 
-Run `scripts/agy-slave.sh -h` for all options.
-
-| Option | Effect |
+| Flag | What it does |
 |---|---|
-| `-s FILE` | JSON Schema; prints `structured_output` |
-| `-f` | allow shell commands (`--dangerously-skip-permissions`) |
-| `-w` | run in a throwaway git worktree (implies `-f`) |
-| `-m FILE` | shared memory file (also `AGY_MEMORY`) |
-| `-c ID` | resume a worker by conversation id |
-| `-t SEC` | hard timeout |
-| `-q` | no cost line |
+| `-w` | work in a safe copy of the repo; you get a diff to apply |
+| `-m FILE` | shared notes between helpers |
+| `-s FILE` | answer as JSON by this schema |
+| `-f` | allow shell commands (use with care) |
+| `-c ID` | continue an earlier helper |
+| `-t SEC` | time limit |
 
-| Environment | Effect |
-|---|---|
-| `AGY_CHAIN_<TIER>` | override a tier's model chain, e.g. `AGY_CHAIN_GEMINI_HIGH="gemini-3.9-flash-high"` |
-| `AGY_MEMORY` | default memory file |
-| `AGY_MEMORY_TAIL` / `AGY_MEMORY_MAX_LINES` | lines read from / written to memory (200 / 40) |
-| `AGY_WORKTREE_DIR` | where worktrees go (default `$TMPDIR/agy-worktrees`) |
+All options: `scripts/agy-slave.sh -h`. Details and fixes:
+[`references/`](references/).
 
-## Security notes
+## Safety
 
-- `agy` has **no enforced read-only mode**. In the default mode workers cannot
-  run shell commands but can still edit files in the folder you give them.
-  Use `-w` for anything that edits code, and read the diff before applying.
-- `-f` and `-w` pass `--dangerously-skip-permissions`. With `-w` the worker's
-  folder is a disposable worktree, but a shell command can still reach
-  anything your user can. Do not use `-f` on untrusted repositories.
-- Prompts and file contents go to the model provider behind Antigravity.
-  Do not hand workers secrets.
-
-## Limitations
-
-- Workers do not talk to each other; shared memory is a file, not a message bus.
-- Each call has about 12 000 tokens and several seconds of overhead. Small jobs
-  are faster done directly.
-- Model ids are hard-coded as defaults and will go stale. Override with
-  `AGY_CHAIN_<TIER>` or pass a model id.
-
-## Layout
-
-```
-SKILL.md                       the skill (instructions for Claude)
-scripts/agy-slave.sh           one worker: tiers, fallback, memory, worktree, guard
-scripts/agy-fanout.sh          many workers in parallel from a tasks file
-references/models.md           models, tiers, overrides, agy flags
-references/troubleshooting.md  every failure mode observed, with the fix
-examples/                      JSON Schema and tasks file
-install.sh                     installer
-```
+- By default helpers **cannot run shell commands**.
+- Helpers can still edit files. If one changes something it should only read,
+  you get a warning. For real edits use `-w`: your checkout is not touched.
+- `-f` and `-w` give full access. Do not use `-f` on code you do not trust.
+- Your prompts and files go to the model provider. Do not give helpers secrets.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE) © [Zarfiks](https://github.com/Zarfiks)
 
-Not affiliated with Google, Anthropic or OpenAI. "Antigravity", "Gemini",
-"Claude" and "GPT" are trademarks of their owners.
+Not affiliated with Google, Anthropic or OpenAI. All names are trademarks of
+their owners.
