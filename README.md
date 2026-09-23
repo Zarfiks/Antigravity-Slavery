@@ -100,20 +100,25 @@ scripts/agy-slave.sh gemini-medium "Explain src/net/client.py" ./repo
 scripts/agy-slave.sh -w -o src/billing/ -v "npm test" gemini-high "Fix the rounding bug" ./repo
 scripts/agy-merge.sh /tmp/agy-worktrees/repo-...   # path is printed; brings the change back
 
-# many helpers at once, one task per line, with shared notes
-scripts/agy-fanout.sh -j 3 -m notes.md gemini-medium ./repo examples/tasks.txt
+# a queue of helpers: one task per line, at most 3 at once, 1 of them writing
+scripts/agy-fanout.sh -j 3 --max-write 1 -m notes.md gemini-medium ./repo examples/tasks.txt
 ```
 
 ```bash
 # two model families review the same code; you get what they agree on
 scripts/agy-consensus.sh "Review src/auth/ for security bugs" ./repo
 
-# which model is behind each name right now
+# which model is behind each name right now; what the helpers cost so far
 scripts/agy-models.sh
+scripts/agy-cost.sh --since 2026-09-23
 ```
 
+Put your project's checks in `.agy-verify` (one command per line, e.g.
+`npm run lint`, `npx tsc --noEmit`, `npm test`) and every editing helper is
+checked with them automatically.
+
 On Windows PowerShell: `scripts\agy.ps1 slave gemini-medium "..." C:\code\repo`
-(also `fanout`, `consensus`, `merge`, `models`).
+(also `fanout`, `consensus`, `merge`, `models`, `cost`).
 
 | Flag | What it does |
 |---|---|

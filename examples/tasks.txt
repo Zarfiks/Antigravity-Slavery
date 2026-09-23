@@ -1,9 +1,12 @@
-# One prompt per line. Lines starting with # are skipped.
+# A fan-out queue: one prompt per line, # lines skipped, earlier lines start first.
 # Run: scripts/agy-fanout.sh -j 3 gemini-medium /path/to/repo examples/tasks.txt
-List every public function in src/ with a one-line description. Do not modify any file.
-List every TODO or FIXME comment in the repository with file:line. Do not modify any file.
-List every environment variable the code reads, with file:line. Do not modify any file.
+#
+# Read tasks need a schema: [schema=list|findings|verdict] or -s for all.
+[schema=list] List every public function in src/ with a one-line description.
+[schema=list] List every TODO or FIXME comment in the repository with file:line.
+[schema=list] List every environment variable the code reads, with file:line.
+[schema=findings][tier=opus] Review src/auth/ for security problems.
 
-# Write jobs (run with -w): give every task the paths it owns.
+# Write tasks: give each the paths it owns (at most --max-write run at once).
 # [owns=src/auth/] Add input validation to the login handler
 # [owns=src/billing/,docs/billing.md] Rename Invoice.total to amount everywhere

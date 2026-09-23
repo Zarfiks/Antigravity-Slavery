@@ -21,7 +21,8 @@
 #   -v, --verify "CMD"       write jobs: a check to run in the snapshot afterwards.
 #                            Repeat it for a gate, in order, stopping at the
 #                            first failure: -v "npm run lint" -v "npx tsc" -v "npm test"
-#                            Exit 3 if one fails
+#                            Exit 3 if one fails. Without -v, the lines of
+#                            .agy-verify in the repo root are used
 #   -s, --schema FILE|NAME   JSON Schema file, or a bundled one: findings,
 #                            verdict, list. Prints the parsed structured_output
 #   -r, --retries N          if every model is out of capacity, wait and retry
@@ -45,7 +46,7 @@
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-usage() { sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 schema=""; full=0; write=0; memory="${AGY_MEMORY:-}"; convo_in=""; timeout=0
 quiet=0; inplace=0; keep=0; owns=""; verify=(); retries=1; pos=()
@@ -198,9 +199,22 @@ rundir="$workdir"; before=""
 if is_git "$workdir" && [ "$inplace" = 0 ]; then
     # read snapshots are disposable, whatever happens (set before creating one)
     [ "$mode" = read ] && [ "$keep" = 0 ] && trap drop_snapshot EXIT
+    # a cancelled worker (fan-out --first, Ctrl-C) must still run the EXIT trap
+    trap 'exit 143' TERM INT
     make_snapshot
     rel="$(git -C "$workdir" rev-parse --show-prefix)"   # keep the sub-folder the caller named
     rundir="$wt/$rel"
+    # Project-wide gate: .agy-verify in the repo root, one check per line, in
+    # order (lint, typecheck, tests, build). Used when no -v was given.
+    if [ "$mode" = write ] && [ ${#verify[@]} -eq 0 ] && [ -f "$root/.agy-verify" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%$'\r'}"
+            case "$line" in ''|'#'*) continue ;; esac
+            verify+=("$line")
+        done < "$root/.agy-verify"
+    fi
+    [ "$mode" = write ] && [ ${#verify[@]} -eq 0 ] && \
+        echo "[verify] no gate: no -v and no .agy-verify in $root — you must run the checks yourself" >&2
 elif [ "$mode" = write ]; then
     echo "--write needs <workdir> inside a git repository" >&2; exit 2
 else
@@ -213,6 +227,25 @@ winpath="$(native_path "$rundir")"
 
 # ---- prompt --------------------------------------------------------------
 full_prompt="$prompt"
+
+# Without the shell a worker cannot list directories: it tries `ls`, then
+# read_file on a folder, both are denied, and it burns hundreds of thousands
+# of tokens guessing (measured: 540k tokens, 207 s, empty answer). Handing it
+# the file list up front removes the need. AGY_FILE_LIST=0 turns this off.
+file_cap="${AGY_FILE_LIST:-300}"
+if [ "$file_cap" != 0 ] && is_git "$rundir"; then
+    all_files="$(git -C "$rundir" ls-files -co --exclude-standard 2>/dev/null)"
+    if [ -n "$all_files" ]; then
+        count="$(printf '%s\n' "$all_files" | wc -l | tr -d ' ')"
+        shown="$(printf '%s\n' "$all_files" | head -n "$file_cap")"
+        more=""; [ "$count" -gt "$file_cap" ] && more="
+... and $((count - file_cap)) more files (use your search tool to find them)"
+        full_prompt="$full_prompt
+
+Files in your workspace ($count, paths relative to it). Open them directly with your file viewing tool; you do not need to list directories:
+$shown$more"
+    fi
+fi
 if [ -n "$memory" ] && [ -s "$memory" ]; then
     notes="$(tail -n "${AGY_MEMORY_TAIL:-200}" "$memory")"
     full_prompt="Shared notes left by earlier workers on this job. They may be stale or wrong; verify anything you rely on.
@@ -274,7 +307,11 @@ report_write() {
         was="$(git -C "$wt" rev-parse -q --verify "$base_commit:$f" 2>/dev/null || echo none)"
         [ "$cur" != "$was" ] && echo "[overlap] $f was also changed in your checkout since the snapshot — merge will need care" >&2
     done < <(git -C "$wt" diff --cached --name-only "$base_commit")
-    [ "$n" = 0 ] && echo "[changed] nothing — the worker made no edits" >&2
+    if [ "$n" = 0 ]; then
+        echo "[changed] nothing — the worker made no edits; snapshot removed" >&2
+        drop_snapshot
+        return 0
+    fi
 
     # The verification gate. A worker is never "done" just because agy said
     # SUCCESS: each check runs in the snapshot, in order, first failure stops.
@@ -327,7 +364,7 @@ for model in $chain; do
     # agy exits 0 even when the run failed: the status field is the only
     # trustworthy signal. Parsing, memory append and the run log live here.
     verdict="$(RAW="$raw" TIER="$tier" MODEL="$model" PROMPT="$prompt" MEMORY="$memory" \
-               WORKDIR="$winpath" STATE="$state_dir" MAXLINES="${AGY_MEMORY_MAX_LINES:-40}" MODE="$mode" \
+               WORKDIR="$winpath" STATE="$state_dir" MAXLINES="${AGY_MEMORY_MAX_LINES:-40}" MODE="$mode" SCHEMA="$schema_arg" \
                "$PY" - <<'PYEOF'
 import json, os, sys, time
 raw = os.environ["RAW"]
@@ -349,7 +386,7 @@ log = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "tier": os.environ["TIER"],
        "model": os.environ["MODEL"], "mode": os.environ["MODE"], "workdir": os.environ["WORKDIR"],
        "status": d.get("status"), "conversation_id": d.get("conversation_id"),
        "tokens": u.get("total_tokens"), "seconds": d.get("duration_seconds"),
-       "prompt": os.environ["PROMPT"][:200]}
+       "job": os.environ.get("AGY_JOB", ""), "prompt": os.environ["PROMPT"][:200]}
 try:
     with open(os.path.join(os.environ["STATE"], "runs.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(log, ensure_ascii=False) + "\n")
@@ -360,6 +397,9 @@ if d.get("status") != "SUCCESS":
     out("FAIL\t" + " ".join(str(d.get("error", "status=" + str(d.get("status")))).split())); sys.exit()
 
 body = d.get("structured_output")
+if os.environ.get("SCHEMA") and body is None:
+    # a schema is a contract: prose instead of the fields is a failed call
+    out("FAIL\tanswer ignored the schema (no structured_output)"); sys.exit()
 body = json.dumps(body, ensure_ascii=False, indent=2) if body is not None else (d.get("response") or "")
 denied = ",".join(a.get("action", "?") for a in d.get("denied_actions") or [])
 if not body.strip():

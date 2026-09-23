@@ -11,7 +11,7 @@
 #>
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('slave', 'fanout', 'merge', 'consensus', 'models')]
+    [ValidateSet('slave', 'fanout', 'merge', 'consensus', 'models', 'cost')]
     [string]$Command,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest

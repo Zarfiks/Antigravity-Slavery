@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.3.0 — 2026-09-23
+
+A real scheduler for fan-out, a project-wide gate and cost accounting.
+
+- `agy-fanout.sh` rewritten as a queue: `-j N` total workers,
+  `--max-write N` write workers (default 2), file order = priority, a
+  waiting write task does not block read tasks behind it.
+- `--first`: the first successful task wins; running workers are killed
+  (whole process tree), pending ones skipped, no snapshots left behind.
+- Read and write tasks mix in one file with tags: `[owns=...]`, `[write]`,
+  `[schema=...]`, `[tier=...]`.
+- Contracts are mandatory in fan-out: a read task without a schema is
+  refused unless `--prose`.
+- `.agy-verify` in the repo root: the project's gate (lint, typecheck, tests,
+  build), used by every write job without `-v`. No gate prints a warning.
+- A write job that changed nothing removes its snapshot.
+- New `scripts/agy-cost.sh`: calls, failures, total and median tokens and
+  seconds per tier, filtered by `--job`, `--since`, `--last`. Fan-out prints
+  its total tokens and job id.
+- `agy-merge.sh --prune [DAYS]`: remove old and orphaned snapshots.
+- Cancelled workers (TERM/INT) still clean up their read snapshots.
+- Workers get the workspace file list (`git ls-files`, up to 300 paths) in
+  the prompt. Without the shell they could not list folders and guessed:
+  measured 540 286 tokens / 207 s / empty answer before, 28 497 tokens / 7 s /
+  correct answer after. `AGY_FILE_LIST=N` changes the cap, `0` turns it off.
+- A call run with a schema that answers in prose is now a failure
+  (`answer ignored the schema`) and moves to the next model.
+- Verified live: `agy-consensus.sh` with `gemini-high` + `opus` agreed on both
+  planted bugs in the test repo.
+
 ## 1.2.0 — 2026-09-23
 
 - Dynamic model discovery: `scripts/agy-models.sh` maps capability tiers to

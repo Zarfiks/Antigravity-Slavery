@@ -130,6 +130,31 @@ to another family (for example `sonnet` instead of `gemini-*`) or wait for the
 reset. Observed: Gemini and Claude quotas are separate and reset at different
 times.
 
+## Huge token count, empty or wrong list of files
+
+**Symptom.** A read worker asked to survey a folder runs for minutes, uses
+hundreds of thousands of tokens, reports `denied=command` or
+`denied=read_file`, and returns an empty or partial answer.
+
+**Cause.** Without the shell, a worker cannot list directories. It tries `ls`
+(denied), then `read_file` on a folder (denied), then guesses paths.
+
+**Fix.** Already handled: `agy-slave.sh` puts the `git ls-files` list (up to
+`AGY_FILE_LIST`, default 300 paths) in the prompt. Measured on the same task:
+540 286 tokens / 207 s / empty answer without it, 28 497 tokens / 7 s with it.
+Outside a git repo there is no list; name the files in the prompt yourself.
+
+## `answer ignored the schema`
+
+The model answered in prose although a schema was given. The script treats it
+as a failed call and tries the next model in the chain.
+
+## `read task without a schema`
+
+`agy-fanout.sh` refuses read tasks that would answer in prose. Add
+`-s findings|list|verdict` for all tasks, `[schema=...]` per task, or
+`--prose` if a human will read the answers.
+
 ## `invalid model selection`
 
 You passed `--effort` together with `--model`. Drop `--effort`. See

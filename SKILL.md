@@ -23,6 +23,7 @@ scripts/agy-fanout.sh    [-j N] [options] <tier> <workdir> <tasks.txt> # queue o
 scripts/agy-consensus.sh [-T a,b] "<prompt>" [workdir]                # two families, compared
 scripts/agy-merge.sh     <snapshot>                                    # bring a write job back
 scripts/agy-models.sh                                                  # tiers -> live models
+scripts/agy-cost.sh      [--job ID | --since DATE]                     # what delegation cost
 ```
 
 On Windows without Git Bash on PATH, call them through PowerShell:
@@ -120,6 +121,10 @@ folder. Outside a git repo there is no snapshot; the script warns.
    failures stop early: `-v "<lint>" -v "<typecheck>" -v "<tests>" -v "<build>"`.
    They run inside the snapshot; the first failure stops the gate, prints
    `[verify k/n] FAIL`, and gives exit code 3. Log: `<snapshot>.verify.log`.
+   Put the project's gate in `.agy-verify` at the repo root (one command per
+   line) and every write job uses it without `-v`. With no gate at all the
+   script prints `[verify] no gate` — then you run the checks yourself.
+   A write job that changed nothing removes its snapshot on its own.
 3. **Read the report.** stderr lists `[changed]` files, `[violation]` for
    edits outside `-o`, and `[overlap]` for files you also changed since the
    snapshot was taken.
@@ -130,7 +135,8 @@ folder. Outside a git repo there is no snapshot; the script warns.
 5. **Verify in your checkout:** `git diff`, typecheck, tests, build. Only then
    use the result. The worker's word that "it works" is not a check.
 
-`agy-merge.sh --list` shows snapshots waiting for review. Do not leave them.
+`agy-merge.sh --list` shows snapshots waiting for review. Do not leave them;
+`agy-merge.sh --prune [DAYS]` removes old (default 7 days) and orphaned ones.
 
 If a read worker returns nothing with `denied: command`, it tried the shell.
 The script already tells workers the shell is off; rephrase the task before
@@ -204,37 +210,47 @@ Compare the `evidence`, not the wording of the `claims`.
 
 ## Fan-out
 
-One prompt per line in a tasks file; `#` lines are skipped.
-
-```bash
-cat > tasks.txt <<'EOF'
-In src/vision/, list every config key the code reads. Names only.
-In src/control/, list every config key the code reads. Names only.
-In src/webapp/, list every config key the code reads. Names only.
-EOF
-scripts/agy-fanout.sh -j 3 -o out -m .agy-memory.md gemini-medium . tasks.txt
-```
-
-For write fan-outs, prefix every task with the paths it owns:
+A tasks file is a queue: one prompt per line, `#` lines skipped, earlier lines
+start first. Read and write tasks can be mixed; tags before a prompt set it up:
 
 ```
-[owns=src/auth/] Add rate limiting to the login handler
-[owns=src/billing/,docs/billing.md] Rename Invoice.total to amount
+[schema=list] In src/vision/, list every config key the code reads.
+[schema=list] In src/control/, list every config key the code reads.
+[schema=findings][tier=opus] Review src/auth/session.py for race conditions.
+[owns=src/billing/] Rename Invoice.total to amount.
+[owns=docs/] Update docs/billing.md for the rename.
 ```
 
 ```bash
-scripts/agy-fanout.sh -w -v "npm test" gemini-high . tasks.txt
+scripts/agy-fanout.sh -j 4 --max-write 2 -o out -m .agy-memory.md gemini-medium . tasks.txt
 ```
 
-`-j N` is the scheduler: tasks queue up and at most N workers run at once
-(default 4); as one finishes, the next starts. Keep write fan-outs at `-j 2`
-unless the tasks are very independent: every write snapshot is a full
-worktree. Answers go to `out/NN.txt`, cost lines and errors to `out/NN.log`,
-and a summary table to stderr (`ok`, `CHECK` = gate failed or `--owns` left,
-`FAIL`). Files changed by more than one worker are listed as
-`CONFLICT`: merge one snapshot, discard the other and re-run it on top. Budget **10+ minutes** for workers that read many files. Do not
-set a short `-t` timeout: a killed worker returns nothing and you have paid for
-it anyway. Run fan-outs in the background and keep working.
+| Tag / option | Meaning |
+|---|---|
+| `[owns=PATHS]` | write task that may change only PATHS; implies `[write]` |
+| `[write]` | write task without an ownership check (avoid) |
+| `[schema=NAME]` | schema for this read task; `-s NAME` sets it for all |
+| `[tier=NAME]` | this task on another tier or model id |
+| `-j N` | at most N workers at once (default 4) |
+| `--max-write N` | at most N of them write tasks (default 2); a waiting write task does not block read tasks behind it |
+| `--first` | the first successful task wins: running workers are killed, pending ones skipped. For "several ways to find one answer" |
+| `--prose` | allow read tasks without a schema |
+
+Rules the scheduler enforces before spending anything:
+
+- a **read task without a schema is refused** — fan-out results are for a
+  program to aggregate, and prose breaks that;
+- two write tasks that own the same path are refused.
+
+Answers go to `out/NN.txt`, cost lines and errors to `out/NN.log`. The summary
+on stderr shows `ok`, `CHECK` (gate failed or `--owns` left), `FAIL`,
+`cancelled`, `skipped`, the **total tokens**, and a job id for
+`agy-cost.sh --job <id>`. Files changed by more than one worker are listed as
+`CONFLICT`: merge one snapshot, discard the other, re-run it on top.
+
+Budget **10+ minutes** for workers that read many files. Do not set a short
+`-t` timeout: a killed worker returns nothing and you have paid for it anyway.
+Run fan-outs in the background and keep working.
 
 ## Calling agy directly
 
@@ -258,7 +274,7 @@ Rules, each learned from a failure:
    *is* the effort. The combination fails with `invalid model selection`.
 4. **Use `--output-format json`** whenever a program reads the result.
 5. **An empty `response` with `denied_actions`** means a tool was refused in
-   headless mode. See **Access levels**.
+   headless mode. See **Isolation**.
 
 ## Cost reality
 
@@ -271,6 +287,8 @@ Measured on Windows, CLI v1.2.6–1.2.7:
 | Trivial question + JSON schema | 23 s | 30 122 in |
 | List a directory, with `--add-dir` | 44 s | 32 254 |
 | One-line fix in a worktree | 8 s | ~42 000 |
+| Survey `src/` **without** the file list in the prompt | 207 s | 540 286, empty answer |
+| Same survey **with** the file list (default now) | 7 s | 28 497 |
 | Read one 342-line file **without** `--add-dir` | **168 s** | **93 492** |
 | Two-file analysis, no `--add-dir` | killed at 420 s | nothing returned |
 
@@ -279,6 +297,16 @@ files, summarising a big log, the same review across ten modules.
 
 **Do not delegate** what you can answer with two `grep`s. You pay 12k tokens
 and up to a minute to save a 200-token read.
+
+Measure instead of guessing: every call is logged, and
+
+```bash
+scripts/agy-cost.sh --since 2026-09-23   # or --job <id>, --last 20
+```
+
+prints calls, failures, total and median tokens and seconds per tier. If the
+files you would read yourself cost fewer tokens than the median call, do it
+yourself.
 
 ## Rules for the orchestrator
 

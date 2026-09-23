@@ -6,22 +6,26 @@
 #   agy-merge.sh --keep <snapshot>      apply, but keep the snapshot
 #   agy-merge.sh --discard <snapshot>   throw the snapshot away
 #   agy-merge.sh --list                 list snapshots waiting for review
+#   agy-merge.sh --prune [DAYS]         remove snapshots older than DAYS (default 7)
+#                                       and any whose repository is gone
 #
-# The change is applied with `git apply --3way`: files you also edited since
-# the snapshot are merged line by line; real conflicts get conflict markers.
+# Files you did not touch since the snapshot are copied over; files you also
+# edited are merged three-way (`git merge-file`); real conflicts get markers.
 # Nothing is committed — review with `git diff`, run your checks, commit yourself.
 # Exit: 0 ok, 1 conflicts or overlaps (--check), 2 usage error.
 
 set -uo pipefail
-help() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+help() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
-action=apply; keep=0; target=""
+action=apply; keep=0; target=""; days=7
 while [ $# -gt 0 ]; do
     case "$1" in
         --check)   action=check; shift ;;
         --discard) action=discard; shift ;;
         --keep)    keep=1; shift ;;
         --list)    action=list; shift ;;
+        --prune)   action=prune; shift
+                   case "${1:-}" in ''|*[!0-9]*) ;; *) days="$1"; shift ;; esac ;;
         -h|--help) help ;;
         -*)        echo "unknown option: $1" >&2; help ;;
         *)         target="$1"; shift ;;
@@ -42,6 +46,22 @@ if [ "$action" = list ]; then
         printf '%s\n    repo: %s   files changed: %s\n' "$wt" "$root" "$n"
     done
     [ "$found" = 1 ] || echo "no snapshots in $wbase"
+    exit 0
+fi
+
+if [ "$action" = prune ]; then
+    removed=0
+    for m in "$wbase"/*.meta; do
+        [ -e "$m" ] || continue
+        wt="$(sed -n 's/^WT=//p' "$m")"; root="$(sed -n 's/^ROOT=//p' "$m")"
+        if [ ! -d "$root" ] || [ ! -d "$wt" ] || [ -n "$(find "$m" -mmin +"$((days * 1440))" 2>/dev/null)" ]; then
+            git -C "$root" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+            rm -f "$m" "$wt.patch" "$wt.verify.log"
+            [ -d "$root" ] && git -C "$root" worktree prune 2>/dev/null
+            echo "removed $wt"; removed=$((removed + 1))
+        fi
+    done
+    echo "pruned $removed snapshot(s) older than $days day(s) or orphaned"
     exit 0
 fi
 
