@@ -1,169 +1,201 @@
 ---
 name: antigravity-slavery
-description: Delegate work to the Antigravity CLI (`agy`) as disposable subagent workers, so the orchestrator's context stays small. Use when a job can be farmed out — bulk file analysis, parallel review passes, mechanical rewrites, summarisation, cross-checking — or when the user asks to use agy, Antigravity, Gemini 3.8, or "subagents". Covers the six-tier worker roster, exact invocation, structured output, cost reality, and the failure modes that silently return nothing.
+description: Delegate work to the Antigravity CLI (`agy`) as disposable subagent workers, so the orchestrator's context stays small. Use when a job can be farmed out — bulk file analysis, parallel review passes, mechanical rewrites in an isolated git worktree, summarisation, cross-checking an answer with a second model family — or when the user asks to use agy, Antigravity, Gemini, or "subagents". Covers the six worker tiers, how many workers to launch, exact invocation, shared memory between workers, structured output, cost reality, and the failure modes that silently return nothing.
 ---
 
 # Antigravity Slavery
 
-`agy` is the Antigravity CLI (`C:\Users\rdor\AppData\Local\agy\bin\agy`, v1.2.6). In
-**print mode** it runs one prompt to completion and exits. That makes it a disposable
-worker: you fan several out in parallel, keep only their conclusions, and never pay
-context for the files they read.
+`agy` is the Antigravity CLI. In **print mode** (`-p`) it runs one prompt to
+completion and exits. That makes it a disposable worker: you fan several out in
+parallel, keep only their conclusions, and never pay context for the files they
+read.
 
-You stay the orchestrator. Workers do not talk to each other and do not remember
-anything between calls unless you resume a conversation by id.
+You stay the orchestrator. Workers do not talk to each other. They remember
+nothing between calls unless you resume a conversation by id or give them the
+shared memory file (see **Memory**).
 
-## The roster
-
-Six tiers, best to worst. `Call it` is the name to use when talking to the user.
-
-| # | Call it           | Model ID                  | Good for |
-|---|-------------------|---------------------------|----------|
-| 1 | **Supreme**       | `gemini-3.8-flash-high`   | Hard reasoning, architecture questions, anything where being wrong is expensive |
-| 2 | **Smart**         | `gemini-3.8-flash-medium` | Normal analysis, code review passes, "explain this module" |
-| 3 | **Basic**         | `gemini-3.8-flash-low`    | Mechanical work with a clear spec: extract, reformat, list, classify |
-| 4 | **Claudeman**     | `claude-opus-4-6-thinking`| Second opinion on a Supreme answer you distrust; subtle code semantics |
-| 5 | **Mini Claudeman**| `claude-sonnet-4-6`       | Cheaper Claude-flavoured second opinion; prose and docs |
-| 6 | **Dumbest**       | `gpt-oss-120b-medium`     | Throwaway: yes/no checks, string munging, smoke tests of your own pipeline |
-
-Older families exist as fallbacks when a tier is out of capacity:
-`gemini-3.7-flash-{high,medium,low}`, `gemini-3.6-flash-{high,medium,low}`,
-`gemini-3.1-pro-{high,low}`. Run `agy models` to re-check the live list — do not
-trust this table if a call fails with an unknown-model error.
-
-## Invocation — the only form that works
+Everything below goes through two scripts in this skill's `scripts/` folder.
+Use them instead of calling `agy` by hand: they encode every rule in this file.
 
 ```bash
-agy -p "<prompt>" --model <model-id> --output-format json --dangerously-skip-permissions
+scripts/agy-slave.sh  [options] <tier> "<prompt>" [workdir]        # one worker
+scripts/agy-fanout.sh [-j N] [options] <tier> <workdir> <tasks.txt> # many workers
 ```
 
-Five rules, each learned from a failure:
+## Tiers
 
-1. **Never pass `--effort` together with `--model`.** Effort is already baked into
-   the model id. `--model gemini-3.8-flash-high --effort medium` dies with
-   `invalid model selection`, and the Claude models reject `--effort` outright.
-2. **Always `--dangerously-skip-permissions`** in print mode. Without it a worker
-   that decides to touch a file blocks on a permission prompt nobody can answer.
-3. **Always `--output-format json`** when anything but a human reads the result.
-4. **Check `.status`, not the exit code.** A worker that failed still exits 0.
-5. **Hand it the files with `--add-dir` and an absolute Windows path.**
-   This is the one that bites hardest. `agy` **ignores the shell's current
-   directory**. It always runs in its own scratch dir — asked to `pwd`, a worker
-   launched from a repo checkout answered
-   `C:\Users\rdor\.gemini\antigravity-cli\scratch`. `cd`-ing before the call
-   does nothing. Without `--add-dir` the worker cannot find the paths you named,
-   so it hunts the disk for them — and may answer confidently about **a different
-   copy of the file in a different repository**. That happened: a worker asked
-   about `carpilot/vision/line_tracker.py` from one checkout silently read
-   another checkout on the Desktop. Use `cygpath -w` to build the path from Git
-   Bash; `--add-dir` is repeatable.
+Best to cheapest. Use the tier name with the scripts and when talking to the user.
 
-### What the JSON looks like
-
-```json
-{"conversation_id":"...","status":"SUCCESS","response":"OK\n",
- "duration_seconds":3.46,"num_turns":1,
- "usage":{"input_tokens":12147,"output_tokens":27,"thinking_tokens":0,
-          "cache_read_tokens":0,"total_tokens":12174}}
-```
-
-On failure `status` is `ERROR` and `error` carries the reason, e.g.
-`No capacity available for model gpt-oss-120b-medium` (HTTP 503). Exit code is
-still 0. Retry on another tier.
-
-### Structured output
-
-Pass a JSON Schema and the result gains a parsed `structured_output` field:
-
-```bash
-agy -p "Is 17 prime? Answer using the schema." --model gemini-3.8-flash-low \
-    --json-schema ./schema.json --output-format json --dangerously-skip-permissions
-# -> "structured_output":{"reason":"17 is a prime number...","verdict":"yes"}
-```
-
-Use this for every fan-out you will aggregate mechanically. Parsing prose out of
-`response` is how orchestration breaks.
-
-## Cost reality — read before delegating
-
-Delegation is not free and is often **not** the cheap option.
-
-All numbers below are measured, not estimated.
-
-| Job | Time | Tokens |
+| Tier | Model | Use for |
 |---|---|---|
-| `Say OK` (dumbest) | 3 s | 12 147 in |
-| Trivial question + JSON schema | 23 s | 30 122 in |
-| List a directory, **with** `--add-dir` | 44 s | 32 254 total |
-| Read one 342-line file **without** `--add-dir` | **168 s** | **93 492 total** |
-| Two-file analysis, no `--add-dir` | killed at 420 s | nothing returned |
+| `gemini-high`   | Gemini 3.8 Flash (High)      | Hard reasoning, architecture, anything where being wrong is expensive |
+| `gemini-medium` | Gemini 3.8 Flash (Medium)    | Normal analysis, review passes, "explain this module" |
+| `gemini-low`    | Gemini 3.8 Flash (Low)       | Mechanical work with a clear spec: extract, reformat, list, classify |
+| `opus`          | Claude Opus 4.6 (Thinking)   | Second opinion from another model family; subtle code semantics |
+| `sonnet`        | Claude Sonnet 4.6 (Thinking) | Cheaper second opinion; prose and docs |
+| `gpt-oss`       | GPT-OSS 120B (Medium)        | Throwaway: yes/no checks, string munging, smoke tests of your pipeline |
 
-Two things follow. Every call pays **~12 000 input tokens of fixed overhead**
-before your prompt even starts. And the difference between the last two rows is
-almost entirely `--add-dir`: a worker that has to search for your files burns
-three times the tokens and four times the wall clock, or never finishes.
+Each tier falls back to an older model of the same strength when the server
+answers `503 No capacity available`. A raw model id from `agy models` also
+works as the tier argument. The model list changes: if a call fails with an
+unknown-model error, run `agy models` and override the chain, for example
+`AGY_CHAIN_GEMINI_HIGH="gemini-3.9-flash-high gemini-3.8-flash-high"`.
+See `references/models.md`.
+
+## How many workers
+
+Decide before you launch anything. Every call costs about **12 000 input
+tokens of fixed overhead** and 5 seconds to several minutes.
+
+| Situation | Workers |
+|---|---|
+| Answer is two `grep`s or one short file away | **0** — do it yourself |
+| One big read: a long log, a large module, a whole directory | **1**, `gemini-medium` |
+| A judgement you will act on without checking | **2** — `gemini-high` and `opus` on the same prompt; compare |
+| The same question over N independent parts (modules, files, services) | **N**, via `agy-fanout.sh -j 4` |
+| A code change | **1** per independent change, each with `-w` (worktree) |
+
+Two model families that agree is a signal. Two calls to the same family that
+agree is not.
+
+## Access levels
+
+`agy` has no enforced read-only mode. What the flags do in practice (v1.2.7):
+
+| Flags | Shell commands | File edits in the workspace |
+|---|---|---|
+| default (no flag) | **denied** automatically | **allowed** |
+| `-f` / `--full` (`--dangerously-skip-permissions`) | allowed | allowed |
+| `-w` / `--worktree` (implies `--full`) | allowed | allowed, but only inside a throwaway worktree |
+
+`agy --mode plan` does **not** stop file edits either.
 
 So:
 
-**Delegate** when the worker reads a lot and returns a little — surveying many
-files, summarising a big log, running the same review across ten modules. The
-saving is the file content you never load.
+- **Read-only jobs:** use the default. The script snapshots `git status` before
+  and after, and prints `[warning] the worker modified files` if the worker
+  edited something anyway. Put "Do not modify any file" in the prompt.
+- **Jobs that change code:** always use `-w`. The worker gets its own
+  `git worktree` of `HEAD` in a temp folder. Your checkout is not touched. The
+  script prints the diffstat and the commands to apply or discard the change.
+  Uncommitted changes in your checkout are **not** in the worktree.
+- **`--full` without `-w`:** only when the worker must run commands (tests, a
+  build) against your real checkout. Tell the user first.
 
-**Do not delegate** a task you could finish with two `grep`s. You will pay 12k
-tokens and a minute or more to save a 200-token read. In the session this skill
-came from, two delegated code-analysis jobs both timed out with zero output
-while direct `grep`/`sed` answered the same questions in seconds.
+If a default-mode worker returns nothing with `denied: command`, it tried to use
+the shell. Rephrase ("use your file viewing tools, not shell commands") before
+you reach for `--full`.
 
-## Routing
+## Memory
 
-Pick the cheapest tier that can be *checked*.
+Workers share nothing by default. `-m FILE` (or `AGY_MEMORY=FILE`) gives them a
+shared notebook:
 
-- Answer is verifiable by you afterwards (a file path, a line number, a list) →
-  **Basic** or **Dumbest**.
-- Answer is a judgement you will act on without checking → **Supreme**.
-- Answer disagrees with your own reading, or the stakes are high → re-run on
-  **Claudeman** and compare. Two families disagreeing is a signal; two calls to
-  the same family agreeing is not.
-- Never route safety-relevant or destructive decisions to a worker. Workers
-  advise; the orchestrator decides.
+- before the call, the last 200 lines of `FILE` go in front of the prompt,
+  marked as notes that may be stale;
+- after a successful call, the script appends the task and the first 40 lines
+  of the answer to `FILE`.
 
-## Fan-out
+Use one memory file per job, not per project. Good pattern for a multi-stage
+job: stage 1 workers map the code and write to memory; stage 2 workers read
+those notes instead of re-reading the files. Keep the file out of git (the
+bundled `.gitignore` excludes `.agy-memory*.md`).
 
-Launch workers in parallel in the background, then collect. Never block on one.
-
-```bash
-repo="$(cygpath -w "$PWD")"
-for mod in vision control webapp; do
-  agy -p "In carpilot/$mod/, list every config key the code reads. Names only." \
-      --model gemini-3.8-flash-medium --add-dir "$repo" --output-format json \
-      --dangerously-skip-permissions > "out-$mod.json" &
-done
-wait
-```
-
-Budget **10+ minutes** per file-reading worker and never wrap one in a short
-`timeout` — a killed worker returns nothing and you have paid for it anyway.
+Separately, every call (success or failure) is logged as one JSON line in
+`${XDG_STATE_HOME:-~/.local/state}/agy-slave/runs.jsonl`: time, tier, model,
+workdir, status, `conversation_id`, tokens, seconds, prompt head. Use it to
+find a `conversation_id` to resume, or to total the token cost of a job.
 
 ## Resuming a worker
 
-`conversation_id` from the JSON lets you continue one instead of re-paying the
-startup cost:
+The cost line on stderr ends with `conversation=<id>`. Continue that worker
+instead of paying the startup cost again:
 
 ```bash
-agy -p "Now do the same for control/" --conversation <conversation_id> \
-    --output-format json --dangerously-skip-permissions
+scripts/agy-slave.sh -c <id> gemini-medium "Now do the same for control/" ./repo
 ```
 
-`-c` / `--continue` resumes the most recent conversation.
+## Structured output
 
-## Helper
-
-`scripts/agy-slave.sh` wraps all of the above: tier names instead of model ids,
-automatic fallback when a tier is out of capacity, and `status` checking.
+For any fan-out you will aggregate mechanically, pass a JSON Schema. The script
+then prints the parsed `structured_output` instead of prose:
 
 ```bash
-./scripts/agy-slave.sh supreme "Explain the retry logic in io/command_sender.py" ./repo
+scripts/agy-slave.sh -s examples/verdict.schema.json gemini-low "Is 17 prime?" .
+# {"verdict": "yes", "reason": "17 has no divisors other than 1 and itself"}
 ```
 
-See `references/models.md` for the full live model list and `references/troubleshooting.md`
-for every failure mode observed so far.
+Parsing prose out of free-text answers is how orchestration breaks.
+
+## Fan-out
+
+One prompt per line in a tasks file; `#` lines are skipped.
+
+```bash
+cat > tasks.txt <<'EOF'
+In src/vision/, list every config key the code reads. Names only.
+In src/control/, list every config key the code reads. Names only.
+In src/webapp/, list every config key the code reads. Names only.
+EOF
+scripts/agy-fanout.sh -j 3 -o out -m .agy-memory.md gemini-medium . tasks.txt
+```
+
+Answers go to `out/NN.txt`, cost lines and errors to `out/NN.log`, and a summary
+table to stderr. Budget **10+ minutes** for workers that read many files. Do not
+set a short `-t` timeout: a killed worker returns nothing and you have paid for
+it anyway. Run fan-outs in the background and keep working.
+
+## Calling agy directly
+
+Only if the scripts cannot be used. The form that works:
+
+```bash
+agy -p "<prompt>" --model <model-id> --add-dir <absolute path> --output-format json
+```
+
+Rules, each learned from a failure:
+
+1. **Always `--add-dir <absolute path>`.** `agy` ignores the shell's current
+   directory and runs in its own scratch folder. `cd` does nothing. Without
+   `--add-dir` the worker hunts the disk for the file names you gave it — 3×
+   the tokens and 4× the time — and may analyse **a different copy of the
+   repository** with full confidence. On Windows give a Windows path
+   (`cygpath -w` in Git Bash, `wslpath -w` in WSL). The flag can repeat.
+2. **Check `.status`, not the exit code.** A failed run still exits 0 with
+   `"status":"ERROR"` and the reason in `"error"`.
+3. **Never pass `--effort` with `--model`.** The `-high/-medium/-low` suffix
+   *is* the effort. The combination fails with `invalid model selection`.
+4. **Use `--output-format json`** whenever a program reads the result.
+5. **An empty `response` with `denied_actions`** means a tool was refused in
+   headless mode. See **Access levels**.
+
+## Cost reality
+
+Measured on Windows, CLI v1.2.6–1.2.7:
+
+| Job | Time | Tokens |
+|---|---|---|
+| `Say OK` (`gpt-oss`) | 3 s | 12 147 in |
+| Read one small file, with `--add-dir` | 5 s | ~29 000 |
+| Trivial question + JSON schema | 23 s | 30 122 in |
+| List a directory, with `--add-dir` | 44 s | 32 254 |
+| One-line fix in a worktree | 8 s | ~42 000 |
+| Read one 342-line file **without** `--add-dir` | **168 s** | **93 492** |
+| Two-file analysis, no `--add-dir` | killed at 420 s | nothing returned |
+
+**Delegate** when the worker reads a lot and returns a little: surveying many
+files, summarising a big log, the same review across ten modules.
+
+**Do not delegate** what you can answer with two `grep`s. You pay 12k tokens
+and up to a minute to save a 200-token read.
+
+## Rules for the orchestrator
+
+- Pick the cheapest tier whose answer you can **check** (a path, a line number,
+  a list). Use `gemini-high` only for judgements you cannot check.
+- Workers advise; you decide. Never let a worker's answer alone justify a
+  destructive or security-relevant action.
+- Read a worktree diff before you apply it.
+- Tell the user which tier you used and what it cost when the job was large.
+
+Failure modes and fixes: `references/troubleshooting.md`.

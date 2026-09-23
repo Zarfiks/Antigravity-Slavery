@@ -1,0 +1,5 @@
+# One prompt per line. Lines starting with # are skipped.
+# Run: scripts/agy-fanout.sh -j 3 gemini-medium /path/to/repo examples/tasks.txt
+List every public function in src/ with a one-line description. Do not modify any file.
+List every TODO or FIXME comment in the repository with file:line. Do not modify any file.
+List every environment variable the code reads, with file:line. Do not modify any file.

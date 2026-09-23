@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": { "type": "string", "enum": ["yes", "no", "unsure"] },
+    "reason":  { "type": "string" }
+  },
+  "required": ["verdict", "reason"]
+}

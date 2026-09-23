@@ -1,17 +1,38 @@
-# Model roster
+# Models and tiers
 
-Verified against `agy models` on 2026-09-18, CLI v1.2.6.
+Verified against `agy models` on 2026-09-23, CLI v1.2.7.
 
 ## Tier mapping
 
-| Tier | Model ID | Fallbacks when out of capacity |
-|---|---|---|
-| Supreme | `gemini-3.8-flash-high` | `gemini-3.7-flash-high`, `gemini-3.1-pro-high` |
-| Smart | `gemini-3.8-flash-medium` | `gemini-3.7-flash-medium`, `gemini-3.6-flash-medium` |
-| Basic | `gemini-3.8-flash-low` | `gemini-3.7-flash-low`, `gemini-3.6-flash-low` |
-| Claudeman | `claude-opus-4-6-thinking` | `claude-sonnet-4-6` |
-| Mini Claudeman | `claude-sonnet-4-6` | `claude-opus-4-6-thinking` |
-| Dumbest | `gpt-oss-120b-medium` | `gemini-3.6-flash-low` |
+| Tier | Model | Model ID | Fallbacks when out of capacity |
+|---|---|---|---|
+| `gemini-high`   | Gemini 3.8 Flash (High)      | `gemini-3.8-flash-high`    | `gemini-3.7-flash-high`, `gemini-3.1-pro-high` |
+| `gemini-medium` | Gemini 3.8 Flash (Medium)    | `gemini-3.8-flash-medium`  | `gemini-3.7-flash-medium`, `gemini-3.6-flash-medium` |
+| `gemini-low`    | Gemini 3.8 Flash (Low)       | `gemini-3.8-flash-low`     | `gemini-3.7-flash-low`, `gemini-3.6-flash-low` |
+| `opus`          | Claude Opus 4.6 (Thinking)   | `claude-opus-4-6-thinking` | `claude-sonnet-4-6` |
+| `sonnet`        | Claude Sonnet 4.6 (Thinking) | `claude-sonnet-4-6`        | `claude-opus-4-6-thinking` |
+| `gpt-oss`       | GPT-OSS 120B (Medium)        | `gpt-oss-120b-medium`      | `gemini-3.6-flash-low` |
+
+Tier names from v0.1 still work as aliases: `supreme` = `gemini-high`,
+`smart` = `gemini-medium`, `basic` = `gemini-low`, `claudeman` = `opus`,
+`mini-claudeman` = `sonnet`, `dumbest` = `gpt-oss`.
+
+## When the list changes
+
+Model ids rotate. Do not edit the script to follow them. Override a tier's
+chain with an environment variable named `AGY_CHAIN_<TIER>` (upper case,
+`-` becomes `_`):
+
+```bash
+export AGY_CHAIN_GEMINI_HIGH="gemini-3.9-flash-high gemini-3.8-flash-high"
+export AGY_CHAIN_OPUS="claude-opus-5-thinking claude-opus-4-6-thinking"
+```
+
+Or pass a raw model id instead of a tier name:
+
+```bash
+scripts/agy-slave.sh gemini-3.1-pro-high "..." ./repo
+```
 
 ## Full list as reported by the CLI
 
@@ -32,27 +53,36 @@ claude-opus-4-6-thinking   Claude Opus 4.6 (Thinking)
 gpt-oss-120b-medium        GPT-OSS 120B (Medium)
 ```
 
-Refresh with `agy models`. If a call fails with an unknown-model error, this
-file is stale — re-read the live list before guessing.
+Your account may see a different list. Run `agy models` to check.
 
 ## On effort
 
 The `-high` / `-medium` / `-low` suffix **is** the effort setting. There is no
-separate knob to turn:
+separate knob:
 
 - `--model gemini-3.8-flash-high --effort medium`
-  → `error: invalid model selection ... conflicts with --effort=medium`
+  fails: `invalid model selection ... conflicts with --effort=medium`
 - `--model claude-sonnet-4-6 --effort low`
-  → `error: --effort is not supported for model "claude-sonnet-4-6"`
-- `--model gemini-3.1-pro-high --effort high` happens to be accepted, because it
-  agrees with the suffix — which makes it pointless.
+  fails: `--effort is not supported for model "claude-sonnet-4-6"`
+- `--model gemini-3.1-pro-high --effort high` is accepted only because it
+  agrees with the suffix, so it does nothing.
 
 Rule: pass `--model`, never `--effort`.
 
-## Other subcommands
+## Useful agy flags (v1.2.7)
 
-- `agy models` — list models
-- `agy agents` — list agent presets (empty on this machine)
-- `agy mcp` — manage MCP servers
-- `agy plugin` — manage plugins
-- `agy update` — update the CLI
+| Flag | Meaning |
+|---|---|
+| `-p "<prompt>"` | print mode: one prompt, then exit |
+| `--model <id>` | model; includes the effort level |
+| `--add-dir <path>` | give the worker a folder; repeatable; absolute path |
+| `--output-format json` | one JSON result line with `status`, `response`, `usage`, `conversation_id` |
+| `--json-schema <file or string>` | adds a parsed `structured_output` field |
+| `--conversation <id>` / `-c` | resume a worker / the most recent one |
+| `--print-timeout 300s` | hard limit; `0s` waits until the turn completes |
+| `--dangerously-skip-permissions` | allow shell commands without prompting |
+| `--mode plan` | planning mode; does **not** block file edits |
+| `--sandbox` | terminal restrictions (not covered by this skill) |
+
+Other subcommands: `agy models`, `agy agents`, `agy mcp`, `agy plugin`,
+`agy changelog`, `agy update`.
