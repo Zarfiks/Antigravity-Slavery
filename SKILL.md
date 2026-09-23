@@ -14,14 +14,33 @@ You stay the orchestrator. Workers do not talk to each other. They remember
 nothing between calls unless you resume a conversation by id or give them the
 shared memory file (see **Memory**).
 
-Everything below goes through three scripts in this skill's `scripts/` folder.
+Everything below goes through the scripts in this skill's `scripts/` folder.
 Use them instead of calling `agy` by hand: they encode every rule in this file.
 
 ```bash
-scripts/agy-slave.sh  [options] <tier> "<prompt>" [workdir]        # one worker
-scripts/agy-fanout.sh [-j N] [options] <tier> <workdir> <tasks.txt> # many workers
-scripts/agy-merge.sh  <snapshot>                                    # bring a write job back
+scripts/agy-slave.sh     [options] <tier> "<prompt>" [workdir]        # one worker
+scripts/agy-fanout.sh    [-j N] [options] <tier> <workdir> <tasks.txt> # queue of workers
+scripts/agy-consensus.sh [-T a,b] "<prompt>" [workdir]                # two families, compared
+scripts/agy-merge.sh     <snapshot>                                    # bring a write job back
+scripts/agy-models.sh                                                  # tiers -> live models
 ```
+
+On Windows without Git Bash on PATH, call them through PowerShell:
+`scripts\agy.ps1 slave|fanout|consensus|merge|models <args>`.
+
+## The job pipeline
+
+```
+classify ──► 0 workers? do it yourself
+   │
+   ├── read      ─► snapshot ─► agy (shell off) ─► schema answer ─► you check the evidence
+   ├── write     ─► snapshot ─► agy -w -o <files> ─► gate: lint ▸ typecheck ▸ tests ▸ build
+   │                                              ─► you review the diff ─► agy-merge ─► checks again
+   └── judgement ─► agy-consensus (two families) ─► agreed / single ─► you decide
+```
+
+A worker is never "done" because `agy` said `SUCCESS`. It is done when its
+answer is checked (read) or its diff passed the gate and your review (write).
 
 ## Tiers
 
@@ -36,12 +55,14 @@ Best to cheapest. Use the tier name with the scripts and when talking to the use
 | `sonnet`        | Claude Sonnet 4.6 (Thinking) | Cheaper second opinion; prose and docs |
 | `gpt-oss`       | GPT-OSS 120B (Medium)        | Throwaway: yes/no checks, string munging, smoke tests of your pipeline |
 
-Each tier falls back to an older model of the same strength when the server
-answers `503 No capacity available`. A raw model id from `agy models` also
-works as the tier argument. The model list changes: if a call fails with an
-unknown-model error, run `agy models` and override the chain, for example
-`AGY_CHAIN_GEMINI_HIGH="gemini-3.9-flash-high gemini-3.8-flash-high"`.
-See `references/models.md`.
+Tiers are **capabilities**, not model ids. `agy-models.sh` reads the live
+`agy models` list (cached for a day) and fills each tier by pattern, newest
+version first, so a new Gemini or Claude release is picked up without edits.
+Run `scripts/agy-models.sh` to see the current mapping. Each tier falls back to
+the next model when the server answers `503 No capacity available`; if every
+model is busy the whole chain is retried after a pause (`-r N`, default 1).
+A raw model id also works as the tier, and `AGY_CHAIN_<TIER>="a b"` overrides
+a chain. See `references/models.md`.
 
 ## How many workers
 
@@ -50,10 +71,10 @@ tokens of fixed overhead** and 5 seconds to several minutes.
 
 | Situation | Workers |
 |---|---|
-| Answer is two `grep`s or one short file away | **0** — do it yourself |
-| One big read: a long log, a large module, a whole directory | **1**, `gemini-medium` |
-| A judgement you will act on without checking | **2** — `gemini-high` and `opus` on the same prompt; compare |
-| The same question over N independent parts (modules, files, services) | **N**, via `agy-fanout.sh -j 4` |
+| Lookup in 1–2 files, or a couple of `grep`s | **0** — do it yourself |
+| 3–20 files, one question; or one big log / module | **1**, `gemini-medium` |
+| 20+ files split into independent areas | **2–4** in parallel, `agy-fanout.sh -j 4` |
+| Architecture or security judgement you will act on | `agy-consensus.sh` (`gemini-high` + `opus`) |
 | A code change | **1** per independent change, each with `-w -o <its files>` |
 | Review, security, architecture passes while you write code | parallel read workers — safe, each has its own snapshot |
 
@@ -95,8 +116,10 @@ folder. Outside a git repo there is no snapshot; the script warns.
 1. **Split by files.** Give each write worker the paths it owns with `-o`.
    Never give a worker files you are editing yourself, and never give two
    workers the same path. `agy-fanout.sh` refuses duplicate owners.
-2. **Run with a check.** `-v "<cmd>"` runs tests / typecheck / build inside
-   the snapshot after the worker. Failure gives exit code 3 and `[verify] FAIL`.
+2. **Run the gate.** Repeat `-v` for each check, in this order, so cheap
+   failures stop early: `-v "<lint>" -v "<typecheck>" -v "<tests>" -v "<build>"`.
+   They run inside the snapshot; the first failure stops the gate, prints
+   `[verify k/n] FAIL`, and gives exit code 3. Log: `<snapshot>.verify.log`.
 3. **Read the report.** stderr lists `[changed]` files, `[violation]` for
    edits outside `-o`, and `[overlap]` for files you also changed since the
    snapshot was taken.
@@ -142,17 +165,42 @@ instead of paying the startup cost again:
 scripts/agy-slave.sh -c <id> gemini-medium "Now do the same for control/" ./repo
 ```
 
-## Structured output
+## Contracts: structured output
 
-For any fan-out you will aggregate mechanically, pass a JSON Schema. The script
-then prints the parsed `structured_output` instead of prose:
+Every answer a program reads must follow a schema. Three are bundled in
+`schemas/`, usable by name with `-s`:
+
+| `-s` | Shape | Use for |
+|---|---|---|
+| `findings` | `summary`, `findings[]`: `claim`, `severity`, `file`, `line_start`, `line_end`, `evidence`, `confidence` | reviews, audits, bug hunts |
+| `list` | `items[]`: `value`, `file`, `line`, `note` | inventories: config keys, TODOs, endpoints |
+| `verdict` | `verdict` (yes/no/unsure), `reason` | yes/no checks |
 
 ```bash
-scripts/agy-slave.sh -s examples/verdict.schema.json gemini-low "Is 17 prime?" .
-# {"verdict": "yes", "reason": "17 has no divisors other than 1 and itself"}
+scripts/agy-slave.sh -s findings gemini-medium "Review src/auth/ for security bugs" .
 ```
 
-Parsing prose out of free-text answers is how orchestration breaks.
+Your own schema file works too (`-s path/to/schema.json`). A finding without a
+`file`, lines and `evidence` you can open and confirm is a rumour.
+
+## Consensus
+
+For judgements, a second opinion from **another model family** is worth more
+than a louder answer from the same one:
+
+```bash
+scripts/agy-consensus.sh "Review src/auth/ for correctness and security" .
+```
+
+Both workers (default `gemini-high` and `opus`, change with `-T`) answer with
+the `findings` schema, in parallel, each in its own snapshot. Findings on the
+same file and overlapping lines (±3) are merged. Output JSON:
+
+- `agreed` — found by both: strong signal, still open the evidence;
+- `single` — found by one: verify it yourself before acting;
+- `failed` — workers that did not answer.
+
+Compare the `evidence`, not the wording of the `claims`.
 
 ## Fan-out
 
@@ -178,8 +226,12 @@ For write fan-outs, prefix every task with the paths it owns:
 scripts/agy-fanout.sh -w -v "npm test" gemini-high . tasks.txt
 ```
 
-Answers go to `out/NN.txt`, cost lines and errors to `out/NN.log`, and a summary
-table to stderr. Files changed by more than one worker are listed as
+`-j N` is the scheduler: tasks queue up and at most N workers run at once
+(default 4); as one finishes, the next starts. Keep write fan-outs at `-j 2`
+unless the tasks are very independent: every write snapshot is a full
+worktree. Answers go to `out/NN.txt`, cost lines and errors to `out/NN.log`,
+and a summary table to stderr (`ok`, `CHECK` = gate failed or `--owns` left,
+`FAIL`). Files changed by more than one worker are listed as
 `CONFLICT`: merge one snapshot, discard the other and re-run it on top. Budget **10+ minutes** for workers that read many files. Do not
 set a short `-t` timeout: a killed worker returns nothing and you have paid for
 it anyway. Run fan-outs in the background and keep working.

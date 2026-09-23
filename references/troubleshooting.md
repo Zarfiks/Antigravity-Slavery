@@ -113,6 +113,13 @@ git worktree prune
 Every worker gets a `git worktree` plus a copy of untracked files. On very large
 repos use `--in-place` for read jobs, and only while nobody edits that folder.
 
+## `Eligibility check failed ... not available in your location`
+
+An account or region problem, not a model problem: every model fails the same
+way. The script stops the chain and prints `account/region problem`. Check
+that `agy` is signed in, and your VPN or network if Antigravity is not offered
+where you are.
+
 ## `invalid model selection`
 
 You passed `--effort` together with `--model`. Drop `--effort`. See
@@ -120,14 +127,15 @@ You passed `--effort` together with `--model`. Drop `--effort`. See
 
 ## Unknown model
 
-The model list rotated. Run `agy models`, then override the tier chain with
-`AGY_CHAIN_<TIER>="..."` or pass the model id directly.
+The model list rotated and the cache is stale. Run
+`scripts/agy-models.sh --refresh`. If a tier still shows `(no model found)`,
+override it with `AGY_CHAIN_<TIER>="..."` or pass a model id directly.
 
 ## Answer is prose when you wanted fields
 
 Pass `-s schema.json` (script) or `--json-schema schema.json` (by hand) and read
 `structured_output`, not `response`. Example schema:
-`examples/verdict.schema.json`.
+`schemas/` (`-s findings`, `-s list`, `-s verdict`).
 
 ## `python3 is required`
 

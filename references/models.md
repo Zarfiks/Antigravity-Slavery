@@ -17,6 +17,23 @@ Tier names from v0.1 still work as aliases: `supreme` = `gemini-high`,
 `smart` = `gemini-medium`, `basic` = `gemini-low`, `claudeman` = `opus`,
 `mini-claudeman` = `sonnet`, `dumbest` = `gpt-oss`.
 
+## Discovery
+
+`scripts/agy-models.sh` builds every tier from the live list:
+
+| Tier | Pattern, newest version first |
+|---|---|
+| `gemini-high` | `gemini-*-flash-high`, then `gemini-*-pro-high` |
+| `gemini-medium` | `gemini-*-flash-medium`, then `gemini-*-pro-low` |
+| `gemini-low` | `gemini-*-flash-low` |
+| `opus` | `claude-opus-*`, then `claude-sonnet-*` |
+| `sonnet` | `claude-sonnet-*`, then `claude-opus-*` |
+| `gpt-oss` | `gpt-oss-*`, then the oldest `gemini-*-flash-low` |
+
+The list is cached for `AGY_MODELS_TTL` seconds (default 86400);
+`--refresh` re-reads it. The "Tier mapping" table above is the fallback used
+only when discovery fails.
+
 ## When the list changes
 
 Model ids rotate. Do not edit the script to follow them. Override a tier's

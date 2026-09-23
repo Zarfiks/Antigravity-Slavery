@@ -24,7 +24,7 @@
 
 ## What is it
 
-A skill: one `SKILL.md` file plus two small scripts. It teaches your AI coding
+A skill: one `SKILL.md` file plus a few small scripts. It teaches your AI coding
 agent (Claude Code or Codex) to pass work to the
 [Antigravity CLI](https://antigravity.google) (`agy`).
 
@@ -87,7 +87,8 @@ The agent picks the model and the number of helpers by itself.
 | `sonnet`        | Claude Sonnet 4.6       | cheaper second opinion, text |
 | `gpt-oss`       | GPT-OSS 120B            | quick yes/no checks |
 
-If a model is busy, the next one of the same level is used automatically.
+The names are fixed; the models behind them are found automatically from
+`agy models`, newest first. If a model is busy, the next one is used.
 
 ## Run by hand (optional)
 
@@ -103,13 +104,24 @@ scripts/agy-merge.sh /tmp/agy-worktrees/repo-...   # path is printed; brings the
 scripts/agy-fanout.sh -j 3 -m notes.md gemini-medium ./repo examples/tasks.txt
 ```
 
+```bash
+# two model families review the same code; you get what they agree on
+scripts/agy-consensus.sh "Review src/auth/ for security bugs" ./repo
+
+# which model is behind each name right now
+scripts/agy-models.sh
+```
+
+On Windows PowerShell: `scripts\agy.ps1 slave gemini-medium "..." C:\code\repo`
+(also `fanout`, `consensus`, `merge`, `models`).
+
 | Flag | What it does |
 |---|---|
 | `-w` | helper may edit; its changes wait in a snapshot for `agy-merge.sh` |
 | `-o PATHS` | files the helper may change, e.g. `src/auth/,docs/auth.md` |
-| `-v "CMD"` | run tests / build after the helper, in its snapshot |
+| `-v "CMD"` | a check after the helper (repeat: lint, typecheck, tests, build) |
+| `-s NAME` | answer as JSON: `findings`, `list`, `verdict` or your schema file |
 | `-m FILE` | shared notes between helpers |
-| `-s FILE` | answer as JSON by this schema |
 | `-f` | allow shell commands (use with care) |
 | `-c ID` | continue an earlier helper |
 | `-t SEC` | time limit |

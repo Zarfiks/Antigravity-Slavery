@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0 — 2026-09-23
+
+- Dynamic model discovery: `scripts/agy-models.sh` maps capability tiers to
+  the live `agy models` list (cached 24 h), newest version first. Hard-coded
+  chains are only a fallback.
+- Verification gate: `-v` can repeat (lint, typecheck, tests, build); runs in
+  order, stops at the first failure, one log per snapshot.
+- Contracts: bundled schemas `findings`, `list`, `verdict` in `schemas/`,
+  usable by name (`-s findings`).
+- New `scripts/agy-consensus.sh`: same question to two model families,
+  findings matched by file and lines into `agreed` / `single`.
+- Retries: when every model of a tier is busy (503), the chain is retried
+  after 30 s, 60 s, ... (`-r N`, default 1). Account / region errors stop the
+  chain at once with a clear message.
+- New `scripts/agy.ps1`: PowerShell entry point that finds Git Bash.
+- Snapshot creation retries on git's worktree lock; read snapshots are always
+  cleaned up, even when creation fails half-way.
+- `SKILL.md`: job pipeline, delegation table by file count, contracts,
+  consensus, scheduler notes.
+
 ## 1.1.0 — 2026-09-23
 
 Safe parallel work: a worker never touches the files you are editing.

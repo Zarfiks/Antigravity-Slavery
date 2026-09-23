@@ -18,9 +18,14 @@
 #   -o, --owns PATHS         write jobs: comma-separated paths the worker may
 #                            change (e.g. src/auth/,docs/api.md). Changes
 #                            outside them are reported as violations
-#   -v, --verify "CMD"       write jobs: run CMD in the snapshot afterwards
-#                            (tests, typecheck, build); exit 3 if it fails
-#   -s, --schema FILE        JSON Schema; prints the parsed structured_output
+#   -v, --verify "CMD"       write jobs: a check to run in the snapshot afterwards.
+#                            Repeat it for a gate, in order, stopping at the
+#                            first failure: -v "npm run lint" -v "npx tsc" -v "npm test"
+#                            Exit 3 if one fails
+#   -s, --schema FILE|NAME   JSON Schema file, or a bundled one: findings,
+#                            verdict, list. Prints the parsed structured_output
+#   -r, --retries N          if every model is out of capacity, wait and retry
+#                            the whole chain N more times (default 1)
 #   -f, --full               allow shell commands (--dangerously-skip-permissions)
 #   -m, --memory FILE        shared memory: prepend FILE to the prompt, append the
 #                            answer to it afterwards (default: $AGY_MEMORY)
@@ -40,16 +45,17 @@
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-usage() { sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 schema=""; full=0; write=0; memory="${AGY_MEMORY:-}"; convo_in=""; timeout=0
-quiet=0; inplace=0; keep=0; owns=""; verify=""; pos=()
+quiet=0; inplace=0; keep=0; owns=""; verify=(); retries=1; pos=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
         -w|--write|--worktree) write=1; shift ;;
         -o|--owns)         owns="${2:?}"; shift 2 ;;
-        -v|--verify)       verify="${2:?}"; shift 2 ;;
+        -v|--verify)       verify+=("${2:?}"); shift 2 ;;
+        -r|--retries)      retries="${2:?}"; shift 2 ;;
         -s|--schema)       schema="${2:?}"; shift 2 ;;
         -f|--full)         full=1; shift ;;
         -m|--memory)       memory="${2:?}"; shift 2 ;;
@@ -70,9 +76,13 @@ tier="${pos[0]:-}"; prompt="${pos[1]:-}"; workdir="${pos[2]:-.}"
 
 command -v agy >/dev/null 2>&1 || { echo "agy not found on PATH" >&2; exit 2; }
 [ -d "$workdir" ] || { echo "workdir does not exist: $workdir" >&2; exit 2; }
-[ -z "$schema" ] || [ -f "$schema" ] || { echo "schema not found: $schema" >&2; exit 2; }
+if [ -n "$schema" ] && [ ! -f "$schema" ]; then
+    bundled="$here/../schemas/$schema.schema.json"
+    [ -f "$bundled" ] || { echo "schema not found: $schema (bundled: findings, verdict, list)" >&2; exit 2; }
+    schema="$bundled"
+fi
 [ "$write" = 1 ] && [ "$inplace" = 1 ] && { echo "--write and --in-place exclude each other" >&2; exit 2; }
-{ [ -n "$owns" ] || [ -n "$verify" ]; } && [ "$write" = 0 ] && { echo "--owns/--verify need --write" >&2; exit 2; }
+{ [ -n "$owns" ] || [ ${#verify[@]} -gt 0 ]; } && [ "$write" = 0 ] && { echo "--owns/--verify need --write" >&2; exit 2; }
 
 # Python does the JSON work; accept whichever interpreter actually runs
 # (on Windows `python3` may be a Store stub that prints an ad and exits).
@@ -95,17 +105,31 @@ case "$tier" in              # names from v0.1 keep working
     dumbest)        tier=gpt-oss ;;
 esac
 
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/agy-slave"
+mkdir -p "$state_dir" 2>/dev/null || true
+
+# Tiers are capabilities, not model ids. The chain is built from the live
+# `agy models` list (cached for a day), newest version first, so a renamed or
+# new model does not break anything. The static chains below are used only if
+# discovery fails. AGY_CHAIN_<TIER>="a b" always wins.
 case "$tier" in
-    gemini-high)   chain="gemini-3.8-flash-high gemini-3.7-flash-high gemini-3.1-pro-high" ;;
-    gemini-medium) chain="gemini-3.8-flash-medium gemini-3.7-flash-medium gemini-3.6-flash-medium" ;;
-    gemini-low)    chain="gemini-3.8-flash-low gemini-3.7-flash-low gemini-3.6-flash-low" ;;
-    opus)          chain="claude-opus-4-6-thinking claude-sonnet-4-6" ;;
-    sonnet)        chain="claude-sonnet-4-6 claude-opus-4-6-thinking" ;;
-    gpt-oss)       chain="gpt-oss-120b-medium gemini-3.6-flash-low" ;;
-    *)             chain="$tier" ;;   # treat as a raw model id
+    gemini-high)   static="gemini-3.8-flash-high gemini-3.7-flash-high gemini-3.1-pro-high" ;;
+    gemini-medium) static="gemini-3.8-flash-medium gemini-3.7-flash-medium gemini-3.6-flash-medium" ;;
+    gemini-low)    static="gemini-3.8-flash-low gemini-3.7-flash-low gemini-3.6-flash-low" ;;
+    opus)          static="claude-opus-4-6-thinking claude-sonnet-4-6" ;;
+    sonnet)        static="claude-sonnet-4-6 claude-opus-4-6-thinking" ;;
+    gpt-oss)       static="gpt-oss-120b-medium gemini-3.6-flash-low" ;;
+    *)             static="" ;;
 esac
 override_var="AGY_CHAIN_$(printf '%s' "$tier" | tr 'a-z-' 'A-Z_' | tr -cd 'A-Z0-9_')"
-chain="${!override_var:-$chain}"
+if [ -n "${!override_var:-}" ]; then
+    chain="${!override_var}"
+elif [ -z "$static" ]; then
+    chain="$tier"                       # a raw model id
+else
+    chain="$("$here/agy-models.sh" --chain "$tier" 2>/dev/null)"
+    [ -n "$chain" ] || chain="$static"
+fi
 
 # ---- paths ---------------------------------------------------------------
 # agy IGNORES the shell's current directory: it always runs in its own scratch
@@ -142,7 +166,13 @@ make_snapshot() {
     wt="$wbase/$name"
     start="$(git -C "$root" stash create 2>/dev/null)"
     [ -n "$start" ] || start=HEAD
-    git -C "$root" worktree add --detach --quiet "$wt" "$start" || exit 2
+    # parallel workers may hit git's worktree lock at the same moment: retry
+    local try
+    for try in 1 2 3 4 5; do
+        git -C "$root" worktree add --detach --quiet "$wt" "$start" 2>/dev/null && break
+        [ "$try" = 5 ] && { echo "git worktree add failed for $wt" >&2; exit 2; }
+        sleep "$try"
+    done
     (cd "$root" && git ls-files -z --others --exclude-standard) |
         while IFS= read -r -d '' f; do
             mkdir -p "$wt/$(dirname "$f")" && cp -p "$root/$f" "$wt/$f"
@@ -166,11 +196,11 @@ mode=read
 
 rundir="$workdir"; before=""
 if is_git "$workdir" && [ "$inplace" = 0 ]; then
+    # read snapshots are disposable, whatever happens (set before creating one)
+    [ "$mode" = read ] && [ "$keep" = 0 ] && trap drop_snapshot EXIT
     make_snapshot
     rel="$(git -C "$workdir" rev-parse --show-prefix)"   # keep the sub-folder the caller named
     rundir="$wt/$rel"
-    # read snapshots are disposable, whatever happens
-    [ "$mode" = read ] && [ "$keep" = 0 ] && trap drop_snapshot EXIT
 elif [ "$mode" = write ]; then
     echo "--write needs <workdir> inside a git repository" >&2; exit 2
 else
@@ -214,9 +244,6 @@ if [ "$full" = 0 ]; then
 (Shell commands are disabled in this session and will be denied. Use only your file viewing and search tools.)"
 fi
 
-state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/agy-slave"
-mkdir -p "$state_dir" 2>/dev/null || true
-
 schema_arg=""
 [ -n "$schema" ] && schema_arg="$(native_path "$(dirname "$schema")")/$(basename "$schema")"
 
@@ -249,12 +276,21 @@ report_write() {
     done < <(git -C "$wt" diff --cached --name-only "$base_commit")
     [ "$n" = 0 ] && echo "[changed] nothing — the worker made no edits" >&2
 
-    if [ -n "$verify" ] && [ "$n" -gt 0 ]; then
-        if (cd "$rundir" && bash -c "$verify") > "$wt.verify.log" 2>&1; then
-            echo "[verify] PASS: $verify" >&2
-        else
-            echo "[verify] FAIL: $verify — log: $wt.verify.log" >&2; rc=3
-        fi
+    # The verification gate. A worker is never "done" just because agy said
+    # SUCCESS: each check runs in the snapshot, in order, first failure stops.
+    if [ ${#verify[@]} -gt 0 ] && [ "$n" -gt 0 ]; then
+        local step=0 cmd
+        : > "$wt.verify.log"
+        for cmd in "${verify[@]}"; do
+            step=$((step + 1))
+            echo "===== [$step/${#verify[@]}] $cmd" >> "$wt.verify.log"
+            if (cd "$rundir" && bash -c "$cmd") >> "$wt.verify.log" 2>&1; then
+                echo "[verify $step/${#verify[@]}] PASS: $cmd" >&2
+            else
+                echo "[verify $step/${#verify[@]}] FAIL: $cmd — log: $wt.verify.log" >&2
+                rc=3; break
+            fi
+        done
     fi
     echo "[snapshot] $wt" >&2
     echo "[merge]    $here/agy-merge.sh \"$wt\"          (review first: git -C \"$wt\" diff $base_commit)" >&2
@@ -276,6 +312,9 @@ report_read() {
 }
 
 # ---- run -----------------------------------------------------------------
+attempt=0
+while :; do
+capacity_only=1
 for model in $chain; do
     args=(-p "$full_prompt" --model "$model" --add-dir "$winpath"
           --output-format json --print-timeout "${timeout}s")
@@ -353,8 +392,23 @@ PYEOF
     fi
 
     echo "[$tier/$model] failed: ${head#*	}" >&2
-    # a permission denial is not a capacity problem: the next model hits it too
+    case "$head" in
+        *503*|*[Cc]apacity*|*UNAVAILABLE*|*"high traffic"*) ;;
+        *) capacity_only=0 ;;
+    esac
+    # a permission denial or an account problem is not a capacity problem:
+    # every other model would fail the same way
     case "$head" in *"denied:"*) break ;; esac
+    case "$head" in
+        *[Ee]ligib*|*"not available in your location"*|*[Uu]nauthenticated*|*"sign in"*|*"log in"*)
+            echo "[$tier] account/region problem, not the model — check 'agy' login or VPN" >&2; break ;;
+    esac
+done
+# Retry the whole chain only when every model was merely busy.
+[ "$capacity_only" = 1 ] && [ "$attempt" -lt "$retries" ] || break
+attempt=$((attempt + 1))
+echo "[$tier] all models busy — retry $attempt/$retries in $((30 * attempt))s" >&2
+sleep $((30 * attempt))
 done
 
 echo "[$tier] every model in the chain failed" >&2

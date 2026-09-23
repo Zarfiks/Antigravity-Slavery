@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "value": { "type": "string" },
+          "file":  { "type": "string" },
+          "line":  { "type": "integer" },
+          "note":  { "type": "string" }
+        },
+        "required": ["value"]
+      }
+    }
+  },
+  "required": ["items"]
+}

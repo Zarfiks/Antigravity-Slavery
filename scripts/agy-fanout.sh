@@ -26,7 +26,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -j) jobs="${2:?}"; shift 2 ;;
         -o) outdir="${2:?}"; shift 2 ;;
-        -s|--schema|-m|--memory|-t|--timeout|-c|--conversation|-v|--verify)
+        -s|--schema|-m|--memory|-t|--timeout|-c|--conversation|-v|--verify|-r|--retries)
             pass+=("$1" "${2:?}"); shift 2 ;;
         -h|--help) help ;;
         -*) pass+=("$1"); shift ;;

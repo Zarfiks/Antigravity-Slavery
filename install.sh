@@ -29,7 +29,7 @@ if [ "$mode" = link ]; then
     ln -s "$src" "$dest"
 else
     mkdir -p "$dest"
-    cp -R "$src/SKILL.md" "$src/scripts" "$src/references" "$src/examples" "$dest/"
+    cp -R "$src/SKILL.md" "$src/scripts" "$src/references" "$src/schemas" "$src/examples" "$dest/"
 fi
 chmod +x "$dest/scripts/"*.sh
 echo "installed ($mode): $dest"
