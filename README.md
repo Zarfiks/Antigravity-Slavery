@@ -33,15 +33,19 @@ reads the files, does the job and returns a short answer. The boss never loads
 those files, so its context stays small and it keeps working on your task.
 
 ```
-You ──► Claude Code / Codex  (boss)
-            ├── agy helper: Gemini high   ─┐
-            ├── agy helper: Gemini medium ─┼──► short answers ──► boss decides
-            ├── agy helper: Claude Opus   ─┘
-            └── shared notes file (helpers read what others found)
+your repo ── Claude Code / Codex (boss) keeps coding here
+   │
+   ├── copy 1 ── agy helper: review          ─┐
+   ├── copy 2 ── agy helper: security check  ─┼──► short answers ──► boss decides
+   └── copy 3 ── agy helper: fix src/billing ─┘──► diff ──► boss checks, merges
 ```
 
+Every helper works in **its own copy** of the repo, so helpers never edit the
+files the boss is editing.
+
 **Good for:** reading a big log, checking the same thing in ten modules,
-a second opinion from another model, simple edits in a safe copy of the repo.
+review and security passes while the boss codes, a second opinion from another
+model, small independent fixes.
 
 **Not for:** small jobs. Every helper costs about 12 000 tokens and a few
 seconds. Two `grep`s are faster.
@@ -91,8 +95,9 @@ If a model is busy, the next one of the same level is used automatically.
 # ask one helper
 scripts/agy-slave.sh gemini-medium "Explain src/net/client.py" ./repo
 
-# let a helper edit code in a safe copy (git worktree)
-scripts/agy-slave.sh -w gemini-high "Fix the bug in calc.py" ./repo
+# let a helper edit code: only src/billing/, then run the tests
+scripts/agy-slave.sh -w -o src/billing/ -v "npm test" gemini-high "Fix the rounding bug" ./repo
+scripts/agy-merge.sh /tmp/agy-worktrees/repo-...   # path is printed; brings the change back
 
 # many helpers at once, one task per line, with shared notes
 scripts/agy-fanout.sh -j 3 -m notes.md gemini-medium ./repo examples/tasks.txt
@@ -100,7 +105,9 @@ scripts/agy-fanout.sh -j 3 -m notes.md gemini-medium ./repo examples/tasks.txt
 
 | Flag | What it does |
 |---|---|
-| `-w` | work in a safe copy of the repo; you get a diff to apply |
+| `-w` | helper may edit; its changes wait in a snapshot for `agy-merge.sh` |
+| `-o PATHS` | files the helper may change, e.g. `src/auth/,docs/auth.md` |
+| `-v "CMD"` | run tests / build after the helper, in its snapshot |
 | `-m FILE` | shared notes between helpers |
 | `-s FILE` | answer as JSON by this schema |
 | `-f` | allow shell commands (use with care) |
@@ -112,10 +119,17 @@ All options: `scripts/agy-slave.sh -h`. Details and fixes:
 
 ## Safety
 
-- By default helpers **cannot run shell commands**.
-- Helpers can still edit files. If one changes something it should only read,
-  you get a warning. For real edits use `-w`: your checkout is not touched.
-- `-f` and `-w` give full access. Do not use `-f` on code you do not trust.
+- **Helpers never work in your folder.** Each one gets its own copy of the
+  repo (a `git worktree` with your uncommitted files too). You and five
+  helpers can work at the same time without stepping on each other.
+- Read helpers' copies are thrown away. Write helpers' changes come back only
+  when you run `agy-merge.sh` — after you looked at the diff.
+- Each write helper owns its files (`-o`). Two helpers on the same file are
+  refused up front, or flagged as `CONFLICT` after a fan-out.
+- `agy-merge.sh` merges line by line if you changed the same file meanwhile;
+  real clashes get conflict markers. Nothing is committed for you.
+- By default helpers **cannot run shell commands**. `-w` and `-f` allow it.
+  Do not use `-f` on code you do not trust.
 - Your prompts and files go to the model provider. Do not give helpers secrets.
 
 ## License

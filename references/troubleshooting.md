@@ -67,25 +67,51 @@ the job really needs the shell use `-w` (worktree) or, with the user's consent,
 **Cause.** `agy` has no enforced read-only mode. File-edit tools work without
 `--dangerously-skip-permissions`, and `--mode plan` does not stop them.
 
-**Fix.** Say "Do not modify any file" in the prompt. `agy-slave.sh` compares
-`git status` and the diff before and after, and prints
-`[warning] the worker modified files in <dir>`. For jobs that should change
-code, use `-w` so the edits land in a throwaway worktree.
+**Fix.** Already handled: in a git repo every worker runs in its own snapshot,
+and a read worker's snapshot is thrown away. The script reports
+`[note] the worker edited N file(s) in its private snapshot; discarded`.
+Only `--in-place` or a non-git folder exposes your files; there the script
+compares `git status` before and after and prints a warning.
 
-## `--worktree` result is missing my latest changes
+## Two workers (or you and a worker) changed the same file
 
-The worktree is created from `HEAD`. Uncommitted changes in your checkout are
-not in it. Commit first, or accept that the worker sees the last commit.
+**Prevention.** Give each write worker its own paths with `-o`. `agy-fanout.sh`
+refuses a tasks file where two `[owns=...]` entries claim the same path.
 
-## Leftover worktrees
+**Detection.** `agy-slave.sh -w` prints `[overlap]` for files you changed in
+your checkout since the snapshot. `agy-fanout.sh` prints `CONFLICT` for files
+changed by more than one worker.
 
-A failed run leaves its worktree in place and prints its path. List and clean:
+**Resolution.** `agy-merge.sh` merges each file three-way (snapshot, yours,
+the worker's) with `git merge-file`. Separate edits merge cleanly; edits to the
+same lines get `<<<<<<< yours` / `>>>>>>> agy` markers and exit code 1. For a
+fan-out conflict: merge one snapshot, discard the other, re-run that task.
+
+## `[violation] <file> is outside --owns`
+
+The worker edited a file it was not given. Exit code 3. Check the diff; merge
+anyway only if the extra edit is wanted, otherwise `agy-merge.sh --discard`.
+
+## `[verify] FAIL`
+
+The `-v` command failed inside the snapshot. Exit code 3. The log path is
+printed (`<snapshot>.verify.log`). Resume the worker with `-c <id>` and the
+error, or discard.
+
+## Leftover snapshots
+
+Write snapshots stay until you merge or discard them. List and clean:
 
 ```bash
-git worktree list
-git worktree remove --force <path>
+scripts/agy-merge.sh --list
+scripts/agy-merge.sh --discard <snapshot>
 git worktree prune
 ```
+
+## Snapshots are slow on a huge repo
+
+Every worker gets a `git worktree` plus a copy of untracked files. On very large
+repos use `--in-place` for read jobs, and only while nobody edits that folder.
 
 ## `invalid model selection`
 

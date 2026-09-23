@@ -14,12 +14,13 @@ You stay the orchestrator. Workers do not talk to each other. They remember
 nothing between calls unless you resume a conversation by id or give them the
 shared memory file (see **Memory**).
 
-Everything below goes through two scripts in this skill's `scripts/` folder.
+Everything below goes through three scripts in this skill's `scripts/` folder.
 Use them instead of calling `agy` by hand: they encode every rule in this file.
 
 ```bash
 scripts/agy-slave.sh  [options] <tier> "<prompt>" [workdir]        # one worker
 scripts/agy-fanout.sh [-j N] [options] <tier> <workdir> <tasks.txt> # many workers
+scripts/agy-merge.sh  <snapshot>                                    # bring a write job back
 ```
 
 ## Tiers
@@ -53,38 +54,64 @@ tokens of fixed overhead** and 5 seconds to several minutes.
 | One big read: a long log, a large module, a whole directory | **1**, `gemini-medium` |
 | A judgement you will act on without checking | **2** — `gemini-high` and `opus` on the same prompt; compare |
 | The same question over N independent parts (modules, files, services) | **N**, via `agy-fanout.sh -j 4` |
-| A code change | **1** per independent change, each with `-w` (worktree) |
+| A code change | **1** per independent change, each with `-w -o <its files>` |
+| Review, security, architecture passes while you write code | parallel read workers — safe, each has its own snapshot |
 
 Two model families that agree is a signal. Two calls to the same family that
 agree is not.
 
-## Access levels
+## Isolation: workers never touch your checkout
 
-`agy` has no enforced read-only mode. What the flags do in practice (v1.2.7):
+The core rule: **a worker never edits the files you are editing.** The script
+enforces it physically, not by asking nicely.
 
-| Flags | Shell commands | File edits in the workspace |
-|---|---|---|
-| default (no flag) | **denied** automatically | **allowed** |
-| `-f` / `--full` (`--dangerously-skip-permissions`) | allowed | allowed |
-| `-w` / `--worktree` (implies `--full`) | allowed | allowed, but only inside a throwaway worktree |
+In a git repository every worker gets its **own snapshot**: a `git worktree`
+in a temp folder that holds your files exactly as they are now — uncommitted
+edits and untracked files included. Your checkout is never the worker's
+workspace.
 
-`agy --mode plan` does **not** stop file edits either.
+```
+your checkout ── you (Claude / Codex) keep editing
+   │
+   ├── snapshot 1 ── agy: review            (read, thrown away)
+   ├── snapshot 2 ── agy: security pass     (read, thrown away)
+   └── snapshot 3 ── agy: fix src/billing/  (write, kept until you merge)
+```
 
-So:
+| Mode | Command | Shell | What happens to its edits |
+|---|---|---|---|
+| read (default) | `agy-slave.sh gemini-medium "..." .` | denied | discarded with the snapshot |
+| write | `agy-slave.sh -w -o src/billing/ -v "npm test" gemini-high "..." .` | allowed | kept; you merge with `agy-merge.sh` |
+| read in place | `--in-place` | denied | land in your checkout; a guard warns |
 
-- **Read-only jobs:** use the default. The script snapshots `git status` before
-  and after, and prints `[warning] the worker modified files` if the worker
-  edited something anyway. Put "Do not modify any file" in the prompt.
-- **Jobs that change code:** always use `-w`. The worker gets its own
-  `git worktree` of `HEAD` in a temp folder. Your checkout is not touched. The
-  script prints the diffstat and the commands to apply or discard the change.
-  Uncommitted changes in your checkout are **not** in the worktree.
-- **`--full` without `-w`:** only when the worker must run commands (tests, a
-  build) against your real checkout. Tell the user first.
+Why the snapshot is needed: `agy` has **no** enforced read-only mode. Without
+`--dangerously-skip-permissions` it cannot run shell commands, but its file-edit
+tools still work, and `--mode plan` does not stop them. Use `--in-place` only
+for huge repos where a snapshot is too slow, and never while you edit the same
+folder. Outside a git repo there is no snapshot; the script warns.
 
-If a default-mode worker returns nothing with `denied: command`, it tried to use
-the shell. Rephrase ("use your file viewing tools, not shell commands") before
-you reach for `--full`.
+### Write jobs, step by step
+
+1. **Split by files.** Give each write worker the paths it owns with `-o`.
+   Never give a worker files you are editing yourself, and never give two
+   workers the same path. `agy-fanout.sh` refuses duplicate owners.
+2. **Run with a check.** `-v "<cmd>"` runs tests / typecheck / build inside
+   the snapshot after the worker. Failure gives exit code 3 and `[verify] FAIL`.
+3. **Read the report.** stderr lists `[changed]` files, `[violation]` for
+   edits outside `-o`, and `[overlap]` for files you also changed since the
+   snapshot was taken.
+4. **Review the diff** (the command is printed), then merge:
+   `agy-merge.sh <snapshot>`. Files you did not touch are copied over; files
+   you changed too are three-way merged; real clashes get `<<<<<<<` markers.
+   Nothing is committed. `agy-merge.sh --check` previews; `--discard` drops.
+5. **Verify in your checkout:** `git diff`, typecheck, tests, build. Only then
+   use the result. The worker's word that "it works" is not a check.
+
+`agy-merge.sh --list` shows snapshots waiting for review. Do not leave them.
+
+If a read worker returns nothing with `denied: command`, it tried the shell.
+The script already tells workers the shell is off; rephrase the task before
+you reach for `-f`. Use `-f` without `-w` only when the user agrees.
 
 ## Memory
 
@@ -140,8 +167,20 @@ EOF
 scripts/agy-fanout.sh -j 3 -o out -m .agy-memory.md gemini-medium . tasks.txt
 ```
 
+For write fan-outs, prefix every task with the paths it owns:
+
+```
+[owns=src/auth/] Add rate limiting to the login handler
+[owns=src/billing/,docs/billing.md] Rename Invoice.total to amount
+```
+
+```bash
+scripts/agy-fanout.sh -w -v "npm test" gemini-high . tasks.txt
+```
+
 Answers go to `out/NN.txt`, cost lines and errors to `out/NN.log`, and a summary
-table to stderr. Budget **10+ minutes** for workers that read many files. Do not
+table to stderr. Files changed by more than one worker are listed as
+`CONFLICT`: merge one snapshot, discard the other and re-run it on top. Budget **10+ minutes** for workers that read many files. Do not
 set a short `-t` timeout: a killed worker returns nothing and you have paid for
 it anyway. Run fan-outs in the background and keep working.
 
@@ -195,7 +234,9 @@ and up to a minute to save a 200-token read.
   a list). Use `gemini-high` only for judgements you cannot check.
 - Workers advise; you decide. Never let a worker's answer alone justify a
   destructive or security-relevant action.
-- Read a worktree diff before you apply it.
+- Never hand a write worker a file you are editing. Split write work by files.
+- Read a snapshot's diff before you merge it, then run typecheck, tests and
+  build in your checkout before you rely on the result.
 - Tell the user which tier you used and what it cost when the job was large.
 
 Failure modes and fixes: `references/troubleshooting.md`.

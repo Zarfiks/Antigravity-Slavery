@@ -7,37 +7,56 @@
 #   gemini-high  gemini-medium  gemini-low  opus  sonnet  gpt-oss
 #   Any raw model id from `agy models` also works (no fallback chain).
 #
+# Isolation (git repos): every worker gets its OWN snapshot — a git worktree
+# holding your current files, uncommitted and untracked ones included. It never
+# works in your checkout, so it can never collide with you or other workers.
+#   read job (default)   snapshot is thrown away afterwards
+#   -w, --write          snapshot is kept; you review and merge it with
+#                        agy-merge.sh. Implies shell access (--full).
+#
 # Options:
+#   -o, --owns PATHS         write jobs: comma-separated paths the worker may
+#                            change (e.g. src/auth/,docs/api.md). Changes
+#                            outside them are reported as violations
+#   -v, --verify "CMD"       write jobs: run CMD in the snapshot afterwards
+#                            (tests, typecheck, build); exit 3 if it fails
 #   -s, --schema FILE        JSON Schema; prints the parsed structured_output
 #   -f, --full               allow shell commands (--dangerously-skip-permissions)
-#   -w, --worktree           run in a throwaway git worktree of <workdir> (HEAD),
-#                            print its path and diffstat; your checkout is untouched.
-#                            Implies --full: editing workers need shell access
 #   -m, --memory FILE        shared memory: prepend FILE to the prompt, append the
-#                            answer to it afterwards (default: $AGY_MEMORY if set)
-#   -c, --conversation ID    resume an earlier worker instead of starting fresh
+#                            answer to it afterwards (default: $AGY_MEMORY)
+#   -c, --conversation ID    resume an earlier worker
 #   -t, --timeout SECONDS    hard limit (agy --print-timeout). Default 0 = none
+#   --in-place               read job directly in <workdir>, no snapshot
+#                            (faster on huge repos; a guard warns on edits)
+#   -k, --keep               keep a read job's snapshot for inspection
 #   -q, --quiet              no cost line on stderr
 #   -h, --help
 #
-# Prints the answer on stdout, a one-line cost report on stderr.
-# Exit codes: 0 ok, 1 every model in the chain failed, 2 usage error.
+# stdout: the answer. stderr: cost line, [changed]/[overlap]/[violation]/[verify]
+# lines, and the merge command for write jobs.
+# Exit: 0 ok, 1 every model failed, 2 usage error, 3 worker ok but verify failed
+# or it changed files outside --owns.
 
 set -uo pipefail
 
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+here="$(cd "$(dirname "$0")" && pwd)"
+usage() { sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
-schema=""; full=0; worktree=0; memory="${AGY_MEMORY:-}"; convo_in=""
-timeout=0; quiet=0; pos=()
+schema=""; full=0; write=0; memory="${AGY_MEMORY:-}"; convo_in=""; timeout=0
+quiet=0; inplace=0; keep=0; owns=""; verify=""; pos=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        -w|--write|--worktree) write=1; shift ;;
+        -o|--owns)         owns="${2:?}"; shift 2 ;;
+        -v|--verify)       verify="${2:?}"; shift 2 ;;
         -s|--schema)       schema="${2:?}"; shift 2 ;;
         -f|--full)         full=1; shift ;;
-        -w|--worktree)     worktree=1; shift ;;
         -m|--memory)       memory="${2:?}"; shift 2 ;;
         -c|--conversation) convo_in="${2:?}"; shift 2 ;;
         -t|--timeout)      timeout="${2:?}"; shift 2 ;;
+        --in-place)        inplace=1; shift ;;
+        -k|--keep)         keep=1; shift ;;
         -q|--quiet)        quiet=1; shift ;;
         -h|--help)         usage ;;
         --)                shift; pos+=("$@"); break ;;
@@ -52,6 +71,8 @@ tier="${pos[0]:-}"; prompt="${pos[1]:-}"; workdir="${pos[2]:-.}"
 command -v agy >/dev/null 2>&1 || { echo "agy not found on PATH" >&2; exit 2; }
 [ -d "$workdir" ] || { echo "workdir does not exist: $workdir" >&2; exit 2; }
 [ -z "$schema" ] || [ -f "$schema" ] || { echo "schema not found: $schema" >&2; exit 2; }
+[ "$write" = 1 ] && [ "$inplace" = 1 ] && { echo "--write and --in-place exclude each other" >&2; exit 2; }
+{ [ -n "$owns" ] || [ -n "$verify" ]; } && [ "$write" = 0 ] && { echo "--owns/--verify need --write" >&2; exit 2; }
 
 # Python does the JSON work; accept whichever interpreter actually runs
 # (on Windows `python3` may be a Store stub that prints an ad and exits).
@@ -106,29 +127,61 @@ native_path() {
 
 is_git() { git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1; }
 
-rundir="$workdir"
-if [ "$worktree" = 1 ]; then
-    full=1
-    is_git "$workdir" || { echo "--worktree needs <workdir> inside a git repository" >&2; exit 2; }
+# ---- snapshot ------------------------------------------------------------
+# A worktree at a commit that holds the checkout exactly as it is now:
+# `git stash create` captures tracked edits without touching your checkout,
+# untracked (non-ignored) files are copied, and everything is committed
+# inside the worktree so the worker's own changes diff cleanly against it.
+wt=""; base_commit=""; root=""
+make_snapshot() {
     root="$(git -C "$workdir" rev-parse --show-toplevel)"
-    base="${AGY_WORKTREE_DIR:-${TMPDIR:-/tmp}/agy-worktrees}"
-    mkdir -p "$base"
-    wt="$base/$(basename "$root")-$(date +%Y%m%d-%H%M%S)-$$"
-    git -C "$root" worktree add --detach --quiet "$wt" HEAD || exit 2
-    # keep the same sub-directory the caller pointed at
-    rel="$(git -C "$workdir" rev-parse --show-prefix)"
+    local wbase start name
+    wbase="${AGY_WORKTREE_DIR:-${TMPDIR:-/tmp}/agy-worktrees}"
+    mkdir -p "$wbase"
+    name="$(basename "$root")-$(date +%Y%m%d-%H%M%S)-$$-$RANDOM"
+    wt="$wbase/$name"
+    start="$(git -C "$root" stash create 2>/dev/null)"
+    [ -n "$start" ] || start=HEAD
+    git -C "$root" worktree add --detach --quiet "$wt" "$start" || exit 2
+    (cd "$root" && git ls-files -z --others --exclude-standard) |
+        while IFS= read -r -d '' f; do
+            mkdir -p "$wt/$(dirname "$f")" && cp -p "$root/$f" "$wt/$f"
+        done
+    git -C "$wt" add -A 2>/dev/null
+    git -C "$wt" -c user.name=agy-slave -c user.email=agy-slave@localhost \
+        commit -q --no-verify --allow-empty -m "agy snapshot of $root"
+    base_commit="$(git -C "$wt" rev-parse HEAD)"
+    printf 'ROOT=%s\nBASE=%s\nWT=%s\nTIER=%s\nOWNS=%s\n' \
+        "$root" "$base_commit" "$wt" "$tier" "$owns" > "$wt.meta"
+}
+drop_snapshot() {
+    [ -n "$wt" ] || return 0
+    git -C "$root" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+    rm -f "$wt.meta"
+    wt=""
+}
+
+mode=read
+[ "$write" = 1 ] && { mode=write; full=1; }
+
+rundir="$workdir"; before=""
+if is_git "$workdir" && [ "$inplace" = 0 ]; then
+    make_snapshot
+    rel="$(git -C "$workdir" rev-parse --show-prefix)"   # keep the sub-folder the caller named
     rundir="$wt/$rel"
+    # read snapshots are disposable, whatever happens
+    [ "$mode" = read ] && [ "$keep" = 0 ] && trap drop_snapshot EXIT
+elif [ "$mode" = write ]; then
+    echo "--write needs <workdir> inside a git repository" >&2; exit 2
+else
+    # in place: no isolation. Remember the state so an unexpected edit is reported.
+    is_git "$workdir" || echo "[warning] $workdir is not a git repository: the worker runs in it directly, unguarded" >&2
+    state_of() { is_git "$1" && { git -C "$1" status --porcelain -uall; git -C "$1" diff HEAD 2>/dev/null | cksum; }; }
+    before="$(state_of "$workdir")"
 fi
 winpath="$(native_path "$rundir")"
 
-# Snapshot the checkout so we can tell the orchestrator if a worker that was
-# only supposed to read went and changed files anyway. agy has no enforced
-# read-only mode: without --full it cannot run shell commands, but its
-# file-edit tools still work.
-snapshot() { is_git "$1" && { git -C "$1" status --porcelain -uall; git -C "$1" diff HEAD 2>/dev/null | cksum; }; }
-before=""; [ "$worktree" = 0 ] && before="$(snapshot "$workdir")"
-
-# ---- memory --------------------------------------------------------------
+# ---- prompt --------------------------------------------------------------
 full_prompt="$prompt"
 if [ -n "$memory" ] && [ -s "$memory" ]; then
     notes="$(tail -n "${AGY_MEMORY_TAIL:-200}" "$memory")"
@@ -141,13 +194,24 @@ Your task:
 $prompt"
 fi
 
+if [ "$mode" = write ]; then
+    full_prompt="$full_prompt
+
+(You are working in an isolated copy of the project. Make the change directly in the files. Do not commit, do not create branches."
+    [ -n "$owns" ] && full_prompt="$full_prompt Only modify these paths: $owns. Leave every other file untouched."
+    full_prompt="$full_prompt)"
+else
+    full_prompt="$full_prompt
+
+(Read-only task: do not modify, create or delete any file.)"
+fi
+
 # Without --full every shell command is auto-denied, and a worker that tries
 # one anyway (models reach for ls/cat/python out of habit) ends with an empty
 # answer. Telling it up front avoids most of those wasted runs.
 if [ "$full" = 0 ]; then
     full_prompt="$full_prompt
-
-(Shell commands are disabled in this session and will be denied. Use only your file viewing, search and editing tools.)"
+(Shell commands are disabled in this session and will be denied. Use only your file viewing and search tools.)"
 fi
 
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/agy-slave"
@@ -155,6 +219,61 @@ mkdir -p "$state_dir" 2>/dev/null || true
 
 schema_arg=""
 [ -n "$schema" ] && schema_arg="$(native_path "$(dirname "$schema")")/$(basename "$schema")"
+
+# ---- after a successful run ----------------------------------------------
+in_owns() {   # is path $1 inside one of the comma-separated --owns entries?
+    local o IFS=,
+    for o in $owns; do
+        o="${o#./}"; o="${o%/}"
+        [ -z "$o" ] && continue
+        [ "$1" = "$o" ] && return 0
+        case "$1" in "$o"/*) return 0 ;; esac
+    done
+    return 1
+}
+
+report_write() {
+    local rc=0 f cur was n=0
+    git -C "$wt" add -A >/dev/null 2>&1
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        n=$((n + 1))
+        echo "[changed] $f" >&2
+        if [ -n "$owns" ] && ! in_owns "$f"; then
+            echo "[violation] $f is outside --owns ($owns)" >&2; rc=3
+        fi
+        # Did YOU change this file in your checkout since the snapshot was taken?
+        if [ -e "$root/$f" ]; then cur="$(git -C "$root" hash-object "$f" 2>/dev/null)"; else cur=none; fi
+        was="$(git -C "$wt" rev-parse -q --verify "$base_commit:$f" 2>/dev/null || echo none)"
+        [ "$cur" != "$was" ] && echo "[overlap] $f was also changed in your checkout since the snapshot — merge will need care" >&2
+    done < <(git -C "$wt" diff --cached --name-only "$base_commit")
+    [ "$n" = 0 ] && echo "[changed] nothing — the worker made no edits" >&2
+
+    if [ -n "$verify" ] && [ "$n" -gt 0 ]; then
+        if (cd "$rundir" && bash -c "$verify") > "$wt.verify.log" 2>&1; then
+            echo "[verify] PASS: $verify" >&2
+        else
+            echo "[verify] FAIL: $verify — log: $wt.verify.log" >&2; rc=3
+        fi
+    fi
+    echo "[snapshot] $wt" >&2
+    echo "[merge]    $here/agy-merge.sh \"$wt\"          (review first: git -C \"$wt\" diff $base_commit)" >&2
+    echo "[discard]  $here/agy-merge.sh --discard \"$wt\"" >&2
+    return "$rc"
+}
+
+report_read() {
+    if [ -n "$wt" ]; then
+        git -C "$wt" add -A >/dev/null 2>&1
+        local n
+        n="$(git -C "$wt" diff --cached --name-only "$base_commit" | wc -l | tr -d ' ')"
+        [ "$n" != 0 ] && echo "[note] the worker edited $n file(s) in its private snapshot; discarded, your checkout is untouched" >&2
+        [ "$keep" = 1 ] && echo "[snapshot] kept at $wt" >&2
+    elif [ -n "$before" ] && [ "$before" != "$(state_of "$workdir")" ]; then
+        echo "[warning] the worker modified files in $workdir — review: git -C \"$workdir\" status" >&2
+    fi
+    return 0
+}
 
 # ---- run -----------------------------------------------------------------
 for model in $chain; do
@@ -169,7 +288,7 @@ for model in $chain; do
     # agy exits 0 even when the run failed: the status field is the only
     # trustworthy signal. Parsing, memory append and the run log live here.
     verdict="$(RAW="$raw" TIER="$tier" MODEL="$model" PROMPT="$prompt" MEMORY="$memory" \
-               WORKDIR="$winpath" STATE="$state_dir" MAXLINES="${AGY_MEMORY_MAX_LINES:-40}" \
+               WORKDIR="$winpath" STATE="$state_dir" MAXLINES="${AGY_MEMORY_MAX_LINES:-40}" MODE="$mode" \
                "$PY" - <<'PYEOF'
 import json, os, sys, time
 raw = os.environ["RAW"]
@@ -188,7 +307,7 @@ except ValueError:
 
 u = d.get("usage") or {}
 log = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "tier": os.environ["TIER"],
-       "model": os.environ["MODEL"], "workdir": os.environ["WORKDIR"],
+       "model": os.environ["MODEL"], "mode": os.environ["MODE"], "workdir": os.environ["WORKDIR"],
        "status": d.get("status"), "conversation_id": d.get("conversation_id"),
        "tokens": u.get("total_tokens"), "seconds": d.get("duration_seconds"),
        "prompt": os.environ["PROMPT"][:200]}
@@ -228,19 +347,9 @@ PYEOF
     if [ "${head%%	*}" = "OK" ]; then
         IFS=$'\t' read -r _ tokens secs convo denied <<< "$head"
         printf '%s\n' "$verdict" | tail -n +2
-
-        if [ "$worktree" = 1 ]; then
-            git -C "$wt" add -A >/dev/null 2>&1
-            echo "[worktree] $wt" >&2
-            git -C "$wt" diff --cached --stat HEAD >&2
-            echo "[worktree] apply:  git -C \"$wt\" diff --cached HEAD | git apply" >&2
-            echo "[worktree] remove: git worktree remove --force \"$wt\"" >&2
-        elif [ -n "$before" ] && [ "$before" != "$(snapshot "$workdir")" ]; then
-            echo "[warning] the worker modified files in $workdir — review: git -C \"$workdir\" status" >&2
-        fi
-
         [ "$quiet" = 1 ] || echo "[$tier/$model] ${tokens} tokens, ${secs}s, conversation=${convo}${denied:+, denied=$denied}" >&2
-        exit 0
+        if [ "$mode" = write ]; then report_write; exit $?; fi
+        report_read; exit 0
     fi
 
     echo "[$tier/$model] failed: ${head#*	}" >&2
@@ -249,5 +358,5 @@ PYEOF
 done
 
 echo "[$tier] every model in the chain failed" >&2
-[ "$worktree" = 1 ] && echo "[worktree] left at $wt (git worktree remove --force \"$wt\")" >&2
+[ "$mode" = write ] && drop_snapshot
 exit 1

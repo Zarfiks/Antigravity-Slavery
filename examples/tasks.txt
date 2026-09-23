@@ -3,3 +3,7 @@
 List every public function in src/ with a one-line description. Do not modify any file.
 List every TODO or FIXME comment in the repository with file:line. Do not modify any file.
 List every environment variable the code reads, with file:line. Do not modify any file.
+
+# Write jobs (run with -w): give every task the paths it owns.
+# [owns=src/auth/] Add input validation to the login handler
+# [owns=src/billing/,docs/billing.md] Rename Invoice.total to amount everywhere

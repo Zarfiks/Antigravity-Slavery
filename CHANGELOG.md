@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.1.0 — 2026-09-23
+
+Safe parallel work: a worker never touches the files you are editing.
+
+- Every worker runs in its own snapshot (`git worktree` with your uncommitted
+  and untracked files). Read snapshots are thrown away; write snapshots wait
+  for review. `--in-place` keeps the old behaviour for huge repos.
+- `-w` is now `--write` (`--worktree` still works). Snapshots include
+  uncommitted changes instead of only `HEAD`.
+- `-o/--owns PATHS`: file ownership for write workers; `[violation]` on edits
+  outside it.
+- `-v/--verify "CMD"`: run tests / typecheck / build in the snapshot.
+- `[overlap]` report when you changed the same file since the snapshot.
+- New `scripts/agy-merge.sh`: three-way merge back into your checkout
+  (`git merge-file`), `--check`, `--discard`, `--list`. Never commits.
+- `agy-fanout.sh`: `[owns=...]` per task, refuses duplicate owners, reports
+  files changed by more than one worker as `CONFLICT`.
+- Exit code 3: worker finished, but verify failed or it left `--owns`.
+
 ## 1.0.0 — 2026-09-23
 
 First public release.
