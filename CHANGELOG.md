@@ -14,6 +14,10 @@
 - Retries: when every model of a tier is busy (503), the chain is retried
   after 30 s, 60 s, ... (`-r N`, default 1). Account / region errors stop the
   chain at once with a clear message.
+- Quota errors (429 `Individual quota reached`) stop the chain at once and show
+  when the quota resets, instead of walking every fallback model.
+- `findings` schema verified against the real `agy` (enum and integer fields
+  accepted).
 - New `scripts/agy.ps1`: PowerShell entry point that finds Git Bash.
 - Snapshot creation retries on git's worktree lock; read snapshots are always
   cleaned up, even when creation fails half-way.

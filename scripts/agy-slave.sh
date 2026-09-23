@@ -402,6 +402,11 @@ PYEOF
     case "$head" in
         *[Ee]ligib*|*"not available in your location"*|*[Uu]nauthenticated*|*"sign in"*|*"log in"*)
             echo "[$tier] account/region problem, not the model — check 'agy' login or VPN" >&2; break ;;
+        *"quota reached"*|*RESOURCE_EXHAUSTED*|*"code 429"*)
+            # the quota is per account, shared by the fallback models: stop here
+            reset="$(printf '%s' "$head" | grep -o 'Resets in [0-9hms]*' | head -n 1)"
+            echo "[$tier] account quota used up${reset:+ ($reset)} — try another tier family or wait" >&2
+            capacity_only=0; break ;;
     esac
 done
 # Retry the whole chain only when every model was merely busy.

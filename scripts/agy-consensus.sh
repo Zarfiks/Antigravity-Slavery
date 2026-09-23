@@ -66,7 +66,8 @@ for t in tiers:
         answers[t] = data.get("findings") or []
     except Exception as e:
         log = open(os.path.join(out, t + ".log"), encoding="utf-8", errors="replace").read().strip().splitlines()
-        failed.append({"tier": t, "error": log[-1] if log else str(e)})
+        reasons = [l.split("failed: ", 1)[1] for l in log if "failed: " in l]
+        failed.append({"tier": t, "error": reasons[0] if reasons else (log[-1] if log else str(e))})
 
 def norm(p):
     p = p.replace("\\", "/")

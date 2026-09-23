@@ -120,6 +120,16 @@ way. The script stops the chain and prints `account/region problem`. Check
 that `agy` is signed in, and your VPN or network if Antigravity is not offered
 where you are.
 
+## `RESOURCE_EXHAUSTED (code 429): Individual quota reached ... Resets in 6h48m`
+
+Your account's quota for that model family is used up. The quota is shared by
+the fallback models of the family, so the script stops the chain at once and
+prints `account quota used up (Resets in ...)`. `agy` itself retries 429
+internally for several minutes before giving up; set `-t` to cap that. Switch
+to another family (for example `sonnet` instead of `gemini-*`) or wait for the
+reset. Observed: Gemini and Claude quotas are separate and reset at different
+times.
+
 ## `invalid model selection`
 
 You passed `--effort` together with `--model`. Drop `--effort`. See
